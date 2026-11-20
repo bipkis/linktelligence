@@ -6,3 +6,8 @@ torch_geometric==2.8.1
 networkx==3.6.1
 numpy==2.1.3
 scikit-learn==1.5.2
+
+# --- Web app (server.py) ---
+fastapi==0.128.0
+uvicorn==0.44.0
+pydantic==2.12.5

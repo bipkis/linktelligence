@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linktelligence — экспертиза топологии ЛВС</title>
+<style>
+  :root{
+    --bg:#0f172a; --panel:#1e293b; --panel2:#273449; --border:#334155;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#3b82f6; --ok:#10b981;
+    --warn:#f59e0b; --bad:#ef4444; --good-bg:rgba(16,185,129,.12); --bad-bg:rgba(239,68,68,.12);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg); color:var(--text); line-height:1.5;
+    font-size:clamp(14px,2.5vw,16px);
+  }
+  .wrap{max-width:1200px;margin:0 auto;padding:clamp(12px,3vw,24px);overflow-x:hidden}
+  header{padding:clamp(12px,3vw,20px) 0; border-bottom:1px solid var(--border); margin-bottom:clamp(12px,3vw,20px)}
+  h1{margin:0; font-size:clamp(1.3rem,4vw,2rem); font-weight:700}
+  header p{margin:.3rem 0 0; color:var(--muted); font-size:clamp(.8rem,2vw,.95rem)}
+  .grid{display:grid; grid-template-columns:1fr 1fr; gap:clamp(12px,3vw,20px)}
+  @media (max-width:760px){ .grid{grid-template-columns:1fr} }
+  .panel{background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:clamp(12px,3vw,18px); min-width:0; overflow-wrap:break-word}
+  .panel h2{margin:0 0 .6rem; font-size:clamp(1rem,2.6vw,1.15rem)}
+  textarea{
+    width:100%; min-height:clamp(140px,28vw,240px); resize:vertical;
+    background:#0b1220; color:#d1d5db; border:1px solid var(--border); border-radius:8px;
+    padding:.7rem; font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+    font-size:clamp(11px,2vw,13px); line-height:1.45;
+  }
+  .btns{display:flex; flex-wrap:wrap; gap:.5rem; margin-top:.7rem}
+  button{
+    flex:1 1 auto; min-width:120px; cursor:pointer; border:1px solid var(--border);
+    background:var(--panel2); color:var(--text); padding:.6rem .9rem; border-radius:8px;
+    font-size:clamp(.82rem,2vw,.95rem); font-weight:600; transition:background .15s,border-color .15s;
+  }
+  button:hover{background:#34465f; border-color:#475569}
+  button.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+  button.primary:hover{background:#2563eb}
+  button:disabled{opacity:.5; cursor:not-allowed}
+  .hint{color:var(--muted); font-size:.82rem; margin-top:.6rem}
+  .file-label{display:inline-block}
+  #fileInput{display:none}
+  .status{margin-top:.7rem; font-size:.9rem; min-height:1.2em}
+  .status.err{color:var(--bad)} .status.ok{color:var(--ok)} .status.load{color:var(--warn)}
+  .empty{color:var(--muted); text-align:center; padding:2rem 1rem}
+
+  .score-row{display:flex; align-items:center; gap:1rem; flex-wrap:wrap; margin-bottom:.8rem}
+  .gauge{position:relative; width:clamp(90px,22vw,120px); height:clamp(90px,22vw,120px); flex:0 0 auto}
+  .gauge svg{transform:rotate(-90deg)}
+  .gauge .val{position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    font-size:clamp(1rem,3vw,1.4rem); font-weight:700}
+  .score-meta{flex:1 1 180px; min-width:0}
+  .score-meta .big{font-size:clamp(1.1rem,3vw,1.5rem); font-weight:700}
+  .verdict{display:inline-block; padding:.15rem .6rem; border-radius:999px; font-size:.8rem; font-weight:600}
+  .v-ok{background:var(--good-bg); color:var(--ok)} .v-bad{background:var(--bad-bg); color:var(--bad)} .v-warn{background:rgba(245,158,11,.15); color:var(--warn)}
+
+  .card{background:var(--panel2); border:1px solid var(--border); border-radius:10px; padding:.8rem .9rem; margin-bottom:.7rem; min-width:0}
+  .card h3{margin:0 0 .4rem; font-size:.98rem; display:flex; justify-content:space-between; gap:.5rem; align-items:center; flex-wrap:wrap}
+  .sub{color:var(--muted); font-size:.82rem; margin:.2rem 0 .5rem}
+  table{width:100%; border-collapse:collapse; font-size:.82rem}
+  th,td{text-align:left; padding:.3rem .35rem; border-bottom:1px solid var(--border); white-space:nowrap}
+  th{color:var(--muted); font-weight:600}
+  .tbl-wrap{overflow-x:auto; min-width:0}
+  .probs{display:flex; gap:.4rem; flex-wrap:wrap; margin-top:.3rem}
+  .prob{flex:1 1 90px; min-width:0; background:#0b1220; border:1px solid var(--border); border-radius:6px; padding:.35rem .5rem; font-size:.78rem}
+  .prob .bar{height:5px; background:var(--border); border-radius:3px; margin-top:.25rem; overflow:hidden}
+  .prob .bar i{display:block; height:100%; background:var(--accent)}
+  .prob.win{border-color:var(--accent)} .prob.win .bar i{background:var(--ok)}
+
+  .summary{background:#0b1220; border-left:3px solid var(--accent); padding:.7rem .9rem; border-radius:6px; font-size:.9rem; margin-bottom:.8rem}
+  .topo-wrap{overflow-x:auto; min-width:0}
+  svg.topo{width:100%; height:auto; display:block; background:#0b1220; border-radius:8px}
+  .legend{display:flex; flex-wrap:wrap; gap:.4rem .8rem; margin-top:.6rem; font-size:.78rem}
+  .legend span{display:inline-flex; align-items:center; gap:.3rem}
+  .legend i{width:11px; height:11px; border-radius:50%; display:inline-block}
+  code{background:#0b1220; padding:.1rem .3rem; border-radius:4px; font-size:.85em}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Linktelligence</h1>
+    <p>Экспертиза топологии ЛВС на базе обученного GNN. Передайте топологию в JSON — получите оценку качества, выявление «узких мест» и проблем безопасности.</p>
+  </header>
+
+  <div class="grid">
+    <!-- Left: input -->
+    <section class="panel">
+      <h2>Топология ЛВС (JSON)</h2>
+      <textarea id="json" spellcheck="false" placeholder='{
+  "nodes": [
+    {"id": 1, "type": "router"},
+    {"id": 2, "type": "switch"},
+    {"id": 3, "type": "host"}
+  ],
+  "edges": [
+    {"source": 1, "target": 2, "bandwidth": 1000, "throughput": 1200},
+    {"source": 2, "target": 3, "bandwidth": 1000, "throughput": 100}
+  ]
+}'></textarea>
+      <div class="btns">
+        <button class="primary" id="analyzeBtn" onclick="analyze()">Анализировать</button>
+        <button onclick="loadSample()">Загрузить пример</button>
+        <label class="file-label">
+          <button onclick="document.getElementById('fileInput').click()">Загрузить .json</button>
+          <input type="file" id="fileInput" accept=".json,application/json">
+        </label>
+      </div>
+      <p class="hint">
+        Типы узлов: router, switch, printer, host, firewall, ids_ips, l3_switch.
+        Ребро: {source, target, bandwidth, throughput}.
+      </p>
+      <div class="status" id="status"></div>
+    </section>
+
+    <!-- Right: results -->
+    <section class="panel">
+      <h2>Результат экспертизы</h2>
+      <div id="results"><div class="empty">Передайте топологию и нажмите «Анализировать».</div></div>
+    </section>
+  </div>
+</div>
+
+<script>
+const TYPE_COLORS = {
+  router:"#ef4444", switch:"#3b82f6", printer:"#8b5cf6", host:"#10b981",
+  firewall:"#f59e0b", ids_ips:"#06b6d4", l3_switch:"#6366f1"
+};
+const $ = id => document.getElementById(id);
+const status = (msg, cls) => { const s=$("status"); s.textContent=msg; s.className="status "+(cls||""); };
+
+function setBusy(b){ $("analyzeBtn").disabled=b; }
+
+async function loadSample(){
+  status("Загрузка примера…","load");
+  try{
+    const r = await fetch("/api/sample");
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    const d = await r.json();
+    $("json").value = JSON.stringify({nodes:d.nodes, edges:d.edges}, null, 2);
+    status("Пример загружен"+(d.source_file?" ("+d.source_file+")":"")+".","ok");
+  }catch(e){ status("Ошибка загрузки примера: "+e.message,"err"); }
+}
+
+$("fileInput").addEventListener("change", ev=>{
+  const f = ev.target.files[0]; if(!f) return;
+  const rd = new FileReader();
+  rd.onload = ()=>{ $("json").value = rd.result; status("Файл загружен: "+f.name,"ok"); };
+  rd.onerror = ()=> status("Не удалось прочитать файл.","err");
+  rd.readAsText(f);
+});
+
+async function analyze(){
+  let parsed;
+  try{ parsed = JSON.parse($("json").value); }
+  catch(e){ status("Невалидный JSON: "+e.message,"err"); return; }
+  if(!parsed.nodes || !Array.isArray(parsed.nodes) || !parsed.nodes.length){
+    status("В JSON нет массива nodes.","err"); return;
+  }
+  if(!parsed.edges) parsed.edges = [];
+  setBusy(true); status("Анализ…","load");
+  try{
+    const r = await fetch("/api/analyze",{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({nodes:parsed.nodes, edges:parsed.edges})
+    });
+    if(!r.ok){
+      const e = await r.json().catch(()=>({detail:"HTTP "+r.status}));
+      throw new Error(typeof e.detail==="string"?e.detail:JSON.stringify(e.detail));
+    }
+    const data = await r.json();
+    render(data);
+    status("Готово.","ok");
+  }catch(e){ status("Ошибка анализа: "+e.message,"err"); }
+  finally{ setBusy(false); }
+}
+
+function pct(p){ return Math.round(p*100)+"%"; }
+function scoreColor(s){ return s>=0.7?"var(--ok)": s>=0.4?"var(--warn)":"var(--bad)"; }
+
+function render(d){
+  const m = d.model, h = d.heuristic;
+  const secProbs = m.security.probabilities;
+  const secWin = m.security.predicted_class;
+  // score gauge
+  const sc = m.score, circ = 2*Math.PI*42, off = circ*(1-sc);
+  let html = `
+    <div class="summary">${d.summary}</div>
+    <div class="score-row">
+      <div class="gauge">
+        <svg width="100%" height="100%" viewBox="0 0 100 100">
+          <circle cx="50" cy="50" r="42" fill="none" stroke="#334155" stroke-width="8"/>
+          <circle cx="50" cy="50" r="42" fill="none" stroke="${scoreColor(sc)}" stroke-width="8"
+            stroke-dasharray="${circ}" stroke-dashoffset="${off}" stroke-linecap="round"/>
+        </svg>
+        <div class="val" style="color:${scoreColor(sc)}">${sc.toFixed(2)}</div>
+      </div>
+      <div class="score-meta">
+        <div class="big">Оценка качества: ${sc.toFixed(2)} / 1.00</div>
+        <div class="sub">Прогноз модели (регрессия). Эвристическая оценка: ${h.score.toFixed(2)}.</div>
+      </div>
+    </div>`;
+
+  // bottleneck card
+  const bn = h.bottleneck, bnPred = m.bottleneck.predicted;
+  const bnVerdict = bn.present ? "ОБНАРУЖЕНО" : "НЕТ";
+  const bnCls = bn.present ? "v-bad":"v-ok";
+  html += `<div class="card">
+    <h3>Узкое место (bottleneck)
+      <span><span class="verdict ${bnCls}">${bnVerdict}</span>
+      <span class="sub" style="display:inline"> P=${pct(m.bottleneck.probability)}</span></span>
+    </h3>
+    <div class="sub">Перегрузка критических узлов (router/firewall): суммарный throughput превышает bandwidth.</div>`;
+  if(bn.present){
+    html += `<div class="tbl-wrap"><table><thead><tr>
+      <th>Узел</th><th>Тип</th><th>Throughput</th><th>Bandwidth</th><th>Ratio</th><th>Перегруз</th></tr></thead><tbody>`;
+    bn.offending_nodes.forEach(n=>{
+      html += `<tr><td>${n.id}</td><td>${n.type}</td><td>${n.throughput}</td>
+        <td>${n.bandwidth}</td><td>${n.ratio}</td><td style="color:var(--bad)">+${n.overshoot}</td></tr>`;
+    });
+    html += `</tbody></table></div>`;
+  } else {
+    html += `<div class="sub" style="margin:0">Все критические узлы имеют запас пропускной способности.</div>`;
+  }
+  html += `</div>`;
+
+  // security card
+  const sec = h.security, secCls = sec.class===0?"v-ok": sec.class===1?"v-warn":"v-bad";
+  html += `<div class="card">
+    <h3>Безопасность (security_flaw)
+      <span><span class="verdict ${secCls}">класс ${sec.class}</span>
+      <span class="sub" style="display:inline"> модель: класс ${secWin}</span></span>
+    </h3>
+    <div class="sub">Распределение вероятностей модели по классам {0,1,2}:</div>
+    <div class="probs">`;
+  secProbs.forEach((p,i)=>{
+    html += `<div class="prob ${i===secWin?'win':''}">
+      <div>класс ${i}: ${pct(p)}</div><div class="bar"><i style="width:${Math.round(p*100)}%"></i></div></div>`;
+  });
+  html += `</div>`;
+
+  // issue A
+  const a = sec.issue_a;
+  html += `<div style="margin-top:.7rem"><strong>${a.present?"⚠":"✓"} ${a.label}</strong>
+    <div class="sub">${a.explanation}</div>`;
+  if(a.present) html += `<div class="sub">Затронутые хосты: <code>${a.affected_host_ids.join(", ")}</code></div>`;
+  html += `</div>`;
+
+  // issue B
+  const b = sec.issue_b;
+  html += `<div style="margin-top:.5rem"><strong>${b.present?"⚠":"✓"} ${b.label}</strong>
+    <div class="sub">${b.explanation}</div>`;
+  if(b.present){
+    html += `<div class="tbl-wrap"><table><thead><tr><th>Из</th><th>В</th><th>Типы</th><th>BW</th><th>TP</th></tr></thead><tbody>`;
+    b.edges.forEach(e=>{
+      html += `<tr><td>${e.source}</td><td>${e.target}</td><td>${e.source_type}–${e.target_type}</td>
+        <td>${e.bandwidth}</td><td>${e.throughput}</td></tr>`;
+    });
+    html += `</tbody></table></div>`;
+  }
+  html += `</div></div>`;
+
+  // topology viz
+  html += `<div class="card"><h3>Топология</h3>`;
+  html += renderTopology(d.topology.nodes, d.topology.edges, h);
+  html += `</div>`;
+
+  $("results").innerHTML = html;
+}
+
+function renderTopology(nodes, edges, h){
+  if(!nodes.length) return "";
+  const idType = {}; const adj = {};
+  nodes.forEach(n=>{ idType[n.id]=n.type; adj[n.id]=[]; });
+  edges.forEach(e=>{ adj[e.source]?.push(e.target); adj[e.target]?.push(e.source); });
+
+  // Root = router with max degree (treat it as the gateway/uplink). If no
+  // router, fall back to the highest-degree node. A router root gives the
+  // natural LAN hierarchy: router -> switches/l3 -> hosts/printers.
+  let root = nodes[0].id, bestRouter = -1, bestAny = -1;
+  nodes.forEach(n=>{
+    const d = adj[n.id].length;
+    if(n.type==="router" && d>bestRouter) bestRouter = d;
+    if(d>bestAny){ bestAny = d; root = n.id; }
+  });
+  nodes.forEach(n=>{ if(n.type==="router" && adj[n.id].length===bestRouter) root = n.id; });
+
+  // BFS spanning forest: depth, parent, tree-children. Disconnected pieces
+  // each get their own root, laid out side by side.
+  const depth={}, parent={}, children={};
+  nodes.forEach(n=>{ depth[n.id]=-1; children[n.id]=[]; });
+  const roots=[];
+  function bfs(start){
+    depth[start]=0; const q=[start];
+    while(q.length){
+      const u=q.shift();
+      for(const v of adj[u]){
+        if(depth[v]===-1){ depth[v]=depth[u]+1; parent[v]=u; children[u].push(v); q.push(v); }
+      }
+    }
+  }
+  bfs(root); roots.push(root);
+  nodes.forEach(n=>{ if(depth[n.id]===-1){ bfs(n.id); roots.push(n.id); } });
+  const maxDepth = Math.max(...Object.values(depth));
+
+  // Subtree width (leaf=1, internal=sum of children) then assign x by an
+  // inorder walk so each parent sits centered over its children. Forests are
+  // placed sequentially with a 1-unit gap between them.
+  const w={};
+  function widthOf(u){
+    if(children[u].length===0){ w[u]=1; return 1; }
+    let s=0; children[u].forEach(c=> s+=widthOf(c)); w[u]=Math.max(1,s); return w[u];
+  }
+  roots.forEach(r=>widthOf(r));
+  const x={}; let cursor=0;
+  function assign(u){
+    if(children[u].length===0){ x[u]=cursor; cursor+=1; return; }
+    let first=null, last=null;
+    children[u].forEach(c=>{ const cxv=assign(c); if(first===null)first=cxv; last=cxv; });
+    x[u]=(first+last)/2;
+  }
+  roots.forEach(r=>{ assign(r); cursor+=1; });
+  const totalUnits = cursor;
+
+  const colW=66, levelH=94, padX=36, padY=28, r=13;
+  const W = Math.max(320, padX*2 + totalUnits*colW);
+  const H = padY*2 + (maxDepth+1)*levelH;
+  const cxOf = id => padX + x[id]*colW;
+  const cyOf = id => padY + depth[id]*levelH;
+
+  const offending = new Set(h.bottleneck.offending_nodes.map(o=>o.id));
+  const prSet = new Set((h.security.issue_b.edges||[]).map(e=>[e.source,e.target].sort().join("-")));
+  const isTreeEdge = (s,t)=> parent[t]===s || parent[s]===t;
+
+  let svg = `<div class="topo-wrap"><svg class="topo" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
+
+  // Tree edges -> orthogonal elbow (parent above child). Non-tree edges
+  // (mesh/cross links) -> dashed, so the hierarchy reads cleanly and the
+  // extra links are still visible as "not part of the tree". Printer<->router
+  // edges are red regardless.
+  edges.forEach(e=>{
+    const ax=cxOf(e.source), ay=cyOf(e.source), bx=cxOf(e.target), by=cyOf(e.target);
+    const key=[e.source,e.target].sort().join("-");
+    const isPR=prSet.has(key), tree=isTreeEdge(e.source,e.target);
+    if(tree){
+      const top = ay<=by ? {x:ax,y:ay} : {x:bx,y:by};
+      const bot = ay<=by ? {x:bx,y:by} : {x:ax,y:ay};
+      const mid = top.y + (bot.y - top.y)/2;
+      const d = `M ${top.x} ${top.y} L ${top.x} ${mid} L ${bot.x} ${mid} L ${bot.x} ${bot.y}`;
+      svg += `<path d="${d}" fill="none" stroke="${isPR?'#ef4444':'#64748b'}" stroke-width="${isPR?2.6:1.6}" opacity="${isPR?1:0.75}"/>`;
+    } else {
+      svg += `<line x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" stroke="${isPR?'#ef4444':'#94a3b8'}" stroke-width="${isPR?2.2:1.2}" stroke-dasharray="${isPR?'none':'5 4'}" opacity="${isPR?0.95:0.5}"/>`;
+    }
+  });
+
+  // Nodes (with type label underneath). Offending bottleneck nodes get a
+  // red ring so the overloaded router is obvious.
+  nodes.forEach(nd=>{
+    const px=cxOf(nd.id), py=cyOf(nd.id); const c=TYPE_COLORS[nd.type]||"#64748b";
+    const isOff=offending.has(nd.id);
+    if(isOff) svg += `<circle cx="${px}" cy="${py}" r="${r+5}" fill="none" stroke="#ef4444" stroke-width="2"/>`;
+    svg += `<circle cx="${px}" cy="${py}" r="${r}" fill="${c}" stroke="#0b1220" stroke-width="2"/>`;
+    svg += `<text x="${px}" y="${py+3.5}" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">${nd.id}</text>`;
+    svg += `<text x="${px}" y="${py+r+13}" text-anchor="middle" font-size="8.5" fill="#94a3b8">${idType[nd.id]}</text>`;
+  });
+  svg += `</svg></div>`;
+
+  // legend
+  const present = [...new Set(nodes.map(n=>n.type))];
+  svg += `<div class="legend">`;
+  present.forEach(t=>{ svg += `<span><i style="background:${TYPE_COLORS[t]||'#64748b'}"></i>${t}</span>`; });
+  svg += `<span><i style="background:transparent;border:2px solid #ef4444"></i>перегруз</span>`;
+  svg += `<span><i style="background:#ef4444"></i>printer↔router</span>`;
+  svg += `<span><i style="width:18px;height:0;border-top:2px dashed #94a3b8;background:transparent;border-radius:0;display:inline-block"></i>не-дерев. ребро</span>`;
+  svg += `</div>`;
+  return svg;
+}
+</script>
+</body>
+</html>
