@@ -1,126 +1,189 @@
+"""PyTorch Geometric dataset for the network-topology GNN prototype.
+
+Fixes vs. the original LAO-produced version:
+  * Labels are read from `data['metadata']` (the original read
+    `data['score']` / `data['bottleneck']` / `data['security_flaw']` at the
+    top level, which does not exist -> every sample raised KeyError and was
+    silently dropped by a bare try/except, leaving an empty dataset).
+  * Node features are enriched from one-hot type (7) to 11 channels:
+    7 one-hot type + degree + incident_bandwidth_sum (normalised)
+    + incident_throughput_sum (normalised) + is_critical(firewall|router).
+    The model can now actually see the signals the bottleneck heuristic
+    depends on.
+  * Edges are added in both directions (undirected graph) and edge_attr
+    is duplicated to match, so message passing is symmetric.
+  * Processing errors are counted and surfaced (no silent empty dataset).
+
+Subclasses `torch.utils.data.Dataset` (not PyG's `Dataset`) on purpose: the
+eager in-memory list works with `torch_geometric.loader.DataLoader` and with
+`torch.utils.data.random_split`, and avoids PyG's raw/processed-dir contract
+that the original bypassed anyway.
+"""
+from __future__ import annotations
+
 import json
 import os
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
 import torch
 import torch_geometric.data
-from torch_geometric.data import Dataset
+from torch.utils.data import Dataset
+
+NODE_TYPES = ["router", "switch", "printer", "host", "firewall", "ids_ips", "l3_switch"]
+NUM_NODE_TYPES = len(NODE_TYPES)
+TYPE_TO_INDEX = {t: i for i, t in enumerate(NODE_TYPES)}
+CRITICAL_TYPES = {"firewall", "router"}
+# 7 one-hot type + degree + inc_bandwidth + inc_throughput + is_critical
+# + tp_per_bw_ratio (the explicit bottleneck decision variable).
+NODE_FEATURE_DIM = NUM_NODE_TYPES + 5
+
+
+def _minmax(values: List[float]) -> List[float]:
+    """Min-max normalise a list to [0, 1]; all-equal -> zeros."""
+    if not values:
+        return []
+    lo, hi = min(values), max(values)
+    if hi - lo <= 0:
+        return [0.0] * len(values)
+    return [(v - lo) / (hi - lo) for v in values]
+
 
 class NetworkDataset(Dataset):
-    """
-    PyTorch Geometric Dataset for network topology prediction.
-    Loads graph data from JSON files in the 'data/' directory.
-    """
-    NODE_TYPES = ["router", "switch", "printer", "host", "firewall", "ids_ips", "l3_switch"]
-    NUM_NODE_TYPES = len(NODE_TYPES)
+    """Loads graph data from JSON files in `<root>/data/` as PyG `Data`."""
 
     def __init__(self, root: str):
-        super().__init__() # Use super().__init__() for Dataset base class
+        self.root = root
         self.data_files = self._load_json_files(root)
-        self.processed_data = []
+        self.processed_data: List[torch_geometric.data.Data] = []
+        self._failures: List[str] = []
         self._process_all_data()
+        if not self.processed_data:
+            raise RuntimeError(
+                f"No usable samples in {os.path.join(root, 'data')}. "
+                f"{len(self._failures)} file(s) failed: {self._failures[:3]}..."
+            )
 
     @staticmethod
-    def _normalize_attributes(bandwidths: List[float], throughputs: List[float]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Normalizes bandwidth and throughput using min-max scaling."""
-        # Bandwidth normalization
-        bw_tensor = torch.tensor(bandwidths, dtype=torch.float32).unsqueeze(1)
-        min_bw, max_bw = bw_tensor.min(), bw_tensor.max()
-        if max_bw - min_bw > 0:
-            normalized_bw = (bw_tensor - min_bw) / (max_bw - min_bw)
-        else:
-            normalized_bw = torch.zeros_like(bw_tensor)
-
-        # Throughput normalization
-        tp_tensor = torch.tensor(throughputs, dtype=torch.float32).unsqueeze(1)
-        min_tp, max_tp = tp_tensor.min(), tp_tensor.max()
-        if max_tp - min_tp > 0:
-            normalized_tp = (tp_tensor - min_tp) / (max_tp - min_tp)
-        else:
-            normalized_tp = torch.zeros_like(tp_tensor)
-
-        return torch.cat([normalized_bw, normalized_tp], dim=1)
-
-    def _load_json_files(self, root: str) -> List[str]:
-        """Loads paths to all JSON files in the specified directory."""
+    def _load_json_files(root: str) -> List[str]:
         data_dir = os.path.join(root, "data")
-        if not os.path.exists(data_dir):
+        if not os.path.isdir(data_dir):
             raise FileNotFoundError(f"Data directory not found at {data_dir}")
-        
-        json_files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith('.json')]
-        return json_files
+        return sorted(
+            os.path.join(data_dir, f)
+            for f in os.listdir(data_dir)
+            if f.endswith(".json")
+        )
 
     def _process_single_graph(self, file_path: str) -> torch_geometric.data.Data:
-        """Processes a single JSON file into a PyG Data object."""
-        with open(file_path, 'r') as f:
+        with open(file_path, "r") as f:
             data: Dict[str, Any] = json.load(f)
 
-        # 1. Process Nodes (One-Hot Encoding)
-        node_ids = [n['id'] for n in data['nodes']]
-        node_types = [n['type'] for n in data['nodes']]
-        
-        # Create mapping from type string to index
-        type_to_index = {t: i for i, t in enumerate(self.NODE_TYPES)}
-        
-        x_list = []
-        for node_type in node_types:
-            encoding = [0] * self.NUM_NODE_TYPES
-            if node_type in type_to_index:
-                idx = type_to_index[node_type]
-                encoding[idx] = 1
-            x_list.append(encoding)
+        nodes = data["nodes"]
+        edges = data["edges"]
 
-        x = torch.tensor(x_list, dtype=torch.float32)
-        
-        # Map node IDs to contiguous indices (0 to N-1) for PyG compatibility
-        node_map = {id: i for i, id in enumerate(sorted(node_ids))}
+        # Map original (possibly non-contiguous) node ids to 0..N-1.
+        node_ids = [n["id"] for n in nodes]
+        node_map = {nid: i for i, nid in enumerate(sorted(node_ids))}
 
-        # 2. Process Edges (Normalized Attributes and Indexing)
-        edge_list = []
-        bandwidths = []
-        throughputs = []
-        
-        for edge in data['edges']:
-            source, target = edge['source'], edge['target']
-            bw = float(edge['bandwidth'])
-            tp = float(edge['throughput'])
+        # Per-node aggregates needed for enriched features.
+        degree = [0] * len(node_ids)
+        inc_bw = [0.0] * len(node_ids)
+        inc_tp = [0.0] * len(node_ids)
+        for e in edges:
+            s = node_map[e["source"]]
+            t = node_map[e["target"]]
+            bw = float(e["bandwidth"])
+            tp = float(e["throughput"])
+            degree[s] += 1
+            degree[t] += 1
+            inc_bw[s] += bw
+            inc_bw[t] += bw
+            inc_tp[s] += tp
+            inc_tp[t] += tp
 
-            # Use mapped indices for PyG compatibility
-            mapped_source = node_map[source]
-            mapped_target = node_map[target]
-            
-            edge_list.append([mapped_source, mapped_target])
-            bandwidths.append(bw)
-            throughputs.append(tp)
+        deg_n = _minmax([float(d) for d in degree])
+        bw_n = _minmax(inc_bw)
+        tp_n = _minmax(inc_tp)
 
-        # Normalize attributes
-        edge_attr = self._normalize_attributes(bandwidths, throughputs)
-        
-        # 3. Process Targets (y)
-        score = float(data['score'])
-        bottleneck = int(data['bottleneck'])
-        security_flaw = int(data['security_flaw'])
+        # Raw throughput/bandwidth ratio per node. This is exactly the
+        # bottleneck decision variable (heuristic flags bottleneck==1 when
+        # any critical node has ratio>1), so giving it to the model directly
+        # turns a razor-edge boundary into a near-linear rule. Clamped to
+        # [0, 10] for numerical stability; non-critical nodes still carry
+        # the value (harmless, attention can learn to ignore them).
+        ratio = [
+            min(10.0, inc_tp[i] / inc_bw[i]) if inc_bw[i] > 0 else 0.0
+            for i in range(len(node_ids))
+        ]
 
-        # Concatenate targets into a single tensor [score, bottleneck, security_flaw]
-        y = torch.tensor([score, bottleneck, security_flaw], dtype=torch.float32)
+        # Build node feature matrix [N, 12].
+        x_rows: List[List[float]] = []
+        for n in nodes:
+            idx = node_map[n["id"]]
+            onehot = [0.0] * NUM_NODE_TYPES
+            tidx = TYPE_TO_INDEX.get(n["type"])
+            if tidx is not None:
+                onehot[tidx] = 1.0
+            is_critical = 1.0 if n["type"] in CRITICAL_TYPES else 0.0
+            x_rows.append(onehot + [deg_n[idx], bw_n[idx], tp_n[idx], is_critical, ratio[idx]])
+        x = torch.tensor(x_rows, dtype=torch.float32)
 
-        # Create PyG Data object
-        edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
+        # Build edge_index (both directions) + edge_attr (normalised [bw, tp]).
+        raw_bw = [float(e["bandwidth"]) for e in edges] * 2  # duplicated for reverse
+        raw_tp = [float(e["throughput"]) for e in edges] * 2
+        bw_norm = _minmax(raw_bw)
+        tp_norm = _minmax(raw_tp)
+
+        src_dst: List[List[int]] = []
+        attrs: List[List[float]] = []
+        for k, e in enumerate(edges):
+            s = node_map[e["source"]]
+            t = node_map[e["target"]]
+            src_dst.append([s, t])
+            src_dst.append([t, s])
+            attrs.append([bw_norm[k], tp_norm[k]])          # forward
+            attrs.append([bw_norm[len(edges) + k], tp_norm[len(edges) + k]])  # reverse
+
+        edge_index = torch.tensor(src_dst, dtype=torch.long).t().contiguous()
+        edge_attr = torch.tensor(attrs, dtype=torch.float32)
+
+        # Labels (read from metadata, not the top level).
+        meta = data["metadata"]
+        score = float(meta["score"])
+        bottleneck = int(meta["bottleneck"])
+        security_flaw = int(meta["security_flaw"])
+        # Graph-level label, stored as [1, 3] so that PyG batching yields
+        # [batch_size, 3] (a 1-D [3] per graph would concatenate into [batch*3]).
+        y = torch.tensor([[score, bottleneck, security_flaw]], dtype=torch.float32)
+
         return torch_geometric.data.Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
 
-    def _process_all_data(self):
-        """Processes all loaded JSON files and stores them as PyG Data objects."""
-        print("Processing dataset...")
+    def _process_all_data(self) -> None:
+        print(f"Processing {len(self.data_files)} JSON file(s)...")
         for file_path in self.data_files:
             try:
-                data_obj = self._process_single_graph(file_path)
-                self.processed_data.append(data_obj)
-            except Exception as e:
-                print(f"Warning: Could not process {file_path}. Error: {e}")
+                self.processed_data.append(self._process_single_graph(file_path))
+            except Exception as exc:  # noqa: BLE001 - surface, don't drop silently
+                self._failures.append(f"{os.path.basename(file_path)}: {exc}")
+        print(
+            f"Processed {len(self.processed_data)}/{len(self.data_files)} samples"
+            + (f" ({len(self._failures)} failed)" if self._failures else "")
+        )
 
-    def __len__(self):
-        """Returns the number of samples in the dataset."""
+    def __len__(self) -> int:
         return len(self.processed_data)
 
-    def __getitem__(self, idx: int) -> torch_geometric.data.Data:
-        """Retrieves a single PyG Data object by index."""
+    def __getitem__(self, idx):
         return self.processed_data[idx]
+
+
+if __name__ == "__main__":
+    # Quick standalone sanity check.
+    import sys
+
+    root = sys.argv[1] if len(sys.argv) > 1 else "."
+    ds = NetworkDataset(root=root)
+    sample = ds[0]
+    print(f"len={len(ds)} | sample.x={tuple(sample.x.shape)} "
+          f"edge_index={tuple(sample.edge_index.shape)} "
+          f"edge_attr={tuple(sample.edge_attr.shape)} y={sample.y.tolist()}")

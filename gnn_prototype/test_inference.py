@@ -1,106 +1,78 @@
-import torch
+"""Run inference on one sample with the trained GNN.
+
+Fixes vs. the original LAO-produced version (this is the task that LAO
+escalated to `max_attempts_reached` / failed):
+  * Uses the real `NetworkGNN`, not a `ModelPlaceholder(nn.Linear(10,3))`
+    whose `load_state_dict` always failed on key mismatch.
+  * Calls `model(x, edge_index, edge_attr, batch)` -- the real signature --
+    instead of `model(input_tensor)` with a single tensor argument.
+  * Reads the three head outputs as tensors and formats them correctly
+    (`score.item()`, `argmax` for the two classification heads) instead of
+    treating the return value as a Python list and calling `.tolist()`/
+    `:0.2f` formatting on tensors.
+  * Also prints the ground-truth labels for comparison.
+"""
+from __future__ import annotations
+
+import argparse
+import json
 import os
+
+import torch
+from torch_geometric.data import Data
+
 from dataset import NetworkDataset
-# Assuming ModelClass is defined elsewhere or passed in, 
-# we would ideally use 'from model import YourModelClass' here.
-# For this fix, we assume a placeholder class structure that mimics the real model for compilation purposes.
-
-class ModelPlaceholder(torch.nn.Module):
-    """A placeholder model mimicking the expected input/output structure."""
-    def __init__(self):
-        super().__init__()
-        # Assuming feature dimension is around 10 based on original context
-        self.linear = torch.nn.Linear(10, 3)
-
-    def forward(self, x):
-        return self.linear(x).tolist()
+from model import NetworkGNN
 
 
-MODEL_PATH = "best_model.pt"
-DATA_ROOT = "." # Assuming data/ is relative to execution root
+def run_inference(model_path: str, data_root: str, sample_idx: int = 0):
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found at {model_path}; run train.py first.")
 
-def load_model(path: str):
-    """Loads the trained model from a given path."""
-    print(f"Loading model from {path}...")
-    try:
-        # 1. Instantiate the actual model class (using placeholder for now)
-        model = ModelPlaceholder() # Replace with actual ModelClass(...)
-        
-        # 2. Load state dictionary using torch.load
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Model file not found at {path}")
+    model = NetworkGNN.from_pretrained(model_path)
+    print(f"Loaded model from {model_path}")
 
-        state_dict = torch.load(path)
-        model.load_state_dict(state_dict)
-        model.eval() # Set model to evaluation mode
-        print("Model loaded successfully.")
-        return model
-    except FileNotFoundError as e:
-        print(f"Error loading model: {e}")
-        return None
-    except Exception as e:
-        print(f"An unexpected error occurred during model loading: {e}")
-        return None
+    dataset = NetworkDataset(root=data_root)
+    if sample_idx >= len(dataset):
+        raise IndexError(f"sample_idx {sample_idx} >= dataset size {len(dataset)}")
 
-def run_inference_on_sample():
-    """Loads data, selects one sample, runs inference, and prints results."""
-    
-    # 1. Load Model
-    model = load_model(MODEL_PATH)
-    if model is None:
-        print("Cannot proceed with inference due to model loading failure.")
-        return
+    sample: Data = dataset[sample_idx]
+    # Single-graph batch vector: all nodes belong to graph 0.
+    batch = torch.zeros(sample.num_nodes, dtype=torch.long)
 
-    # 2. Load Dataset and select one sample
-    try:
-        dataset = NetworkDataset(root=DATA_ROOT)
-        
-        if not dataset.processed_data:
-            print("No processed data found in the dataset.")
-            return
-
-        sample_data = dataset.processed_data[0]
-        print(f"Running inference on the first sample...")
-
-    except FileNotFoundError as e:
-        print(f"Error initializing dataset: {e}")
-        return
-    except Exception as e:
-        print(f"An unexpected error occurred during data loading or processing: {e}")
-        return
-
-    # 3. Run Inference (Actual logic)
-    score = None
-    bottleneck = None
-    security_flaw = None
-    
     with torch.no_grad():
-        # Assuming the model takes node features 'x' as input for simplicity in this fix context
-        input_tensor = sample_data.x 
-        output_raw = model(input_tensor)
+        score, bottleneck, security = model(sample.x, sample.edge_index, sample.edge_attr, batch)
 
-        # Assuming the output is a list/tuple containing [score, bottleneck_id, flaw_flag]
-        if isinstance(output_raw, list) and len(output_raw) >= 3:
-            score = output_raw[0]
-            bottleneck = f"Node {int(output_raw[1])}" # Simulate mapping ID to name
-            security_flaw = "High Risk Detected" if output_raw[2] > 0.5 else "None"
-        else:
-             print("Warning: Model output format unexpected.")
+    # Recover the ground-truth labels from the source JSON for comparison.
+    meta = _ground_truth(data_root, sample_idx)
+    bn_pred = int(bottleneck.argmax(1).item())
+    sec_pred = int(security.argmax(1).item())
 
-
-    # 4. Print Results
     print("\n--- Inference Results ---")
-    if score is not None:
-        print(f"Score: {score:.2f}")
-    else:
-        print("Score: N/A (Inference failed)")
-        
-    if bottleneck is not None:
-        print(f"Bottleneck: {bottleneck}")
+    print(f"sample index    : {sample_idx}")
+    print(f"nodes / edges   : {sample.num_nodes} / {sample.num_edges}")
+    print(f"score           : pred {score.item():.3f}   | true {meta['score']}")
+    print(f"bottleneck      : pred {bn_pred}            | true {meta['bottleneck']}  "
+          f"(logits {[round(v, 3) for v in bottleneck.view(-1).tolist()]})")
+    print(f"security_flaw   : pred {sec_pred}            | true {meta['security_flaw']}  "
+          f"(logits {[round(v, 3) for v in security.view(-1).tolist()]})")
 
-    if security_flaw is not None:
-        print(f"Security Flaw: {security_flaw}")
+
+def _ground_truth(data_root: str, sample_idx: int) -> dict:
+    data_dir = os.path.join(data_root, "data")
+    files = sorted(f for f in os.listdir(data_dir) if f.endswith(".json"))
+    with open(os.path.join(data_dir, files[sample_idx])) as f:
+        return json.load(f)["metadata"]
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Run inference on one sample")
+    ap.add_argument("--model-path", default="best_model.pt")
+    ap.add_argument("--data-root", default=".")
+    ap.add_argument("--sample", type=int, default=0)
+    args = ap.parse_args()
+    run_inference(args.model_path, args.data_root, args.sample)
 
 
 if __name__ == "__main__":
-    run_inference_on_sample()
+    main()
