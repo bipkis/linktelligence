@@ -182,97 +182,157 @@ async function analyze(){
 function pct(p){ return Math.round(p*100)+"%"; }
 function scoreColor(s){ return s>=0.7?"var(--ok)": s>=0.4?"var(--warn)":"var(--bad)"; }
 
+
 function render(d){
-  const m = d.model, h = d.heuristic;
+  const m = d.model;
+
   const secProbs = m.security.probabilities;
   const secWin = m.security.predicted_class;
-  // score gauge
-  const sc = m.score, circ = 2*Math.PI*42, off = circ*(1-sc);
+
+  const bnPred = m.bottleneck.predicted;
+  const bnProb = m.bottleneck.probability;
+
+  const sc = Math.max(0, Math.min(1, m.score));
+  const circ = 2 * Math.PI * 42;
+  const off = circ * (1 - sc);
+
   let html = `
     <div class="summary">${d.summary}</div>
+
     <div class="score-row">
       <div class="gauge">
         <svg width="100%" height="100%" viewBox="0 0 100 100">
-          <circle cx="50" cy="50" r="42" fill="none" stroke="#334155" stroke-width="8"/>
-          <circle cx="50" cy="50" r="42" fill="none" stroke="${scoreColor(sc)}" stroke-width="8"
-            stroke-dasharray="${circ}" stroke-dashoffset="${off}" stroke-linecap="round"/>
+          <circle cx="50" cy="50" r="42"
+            fill="none" stroke="#334155" stroke-width="8"/>
+          <circle cx="50" cy="50" r="42"
+            fill="none"
+            stroke="${scoreColor(sc)}"
+            stroke-width="8"
+            stroke-dasharray="${circ}"
+            stroke-dashoffset="${off}"
+            stroke-linecap="round"/>
         </svg>
-        <div class="val" style="color:${scoreColor(sc)}">${sc.toFixed(2)}</div>
+        <div class="val" style="color:${scoreColor(sc)}">
+          ${sc.toFixed(2)}
+        </div>
       </div>
+
       <div class="score-meta">
-        <div class="big">Оценка качества: ${sc.toFixed(2)} / 1.00</div>
-        <div class="sub">Прогноз модели (регрессия). Эвристическая оценка: ${h.score.toFixed(2)}.</div>
+        <div class="big">
+          Оценка качества: ${sc.toFixed(2)} / 1.00
+        </div>
+        <div class="sub">
+          Регрессионный прогноз GNN.
+        </div>
       </div>
-    </div>`;
+    </div>
+  `;
 
-  // bottleneck card
-  const bn = h.bottleneck, bnPred = m.bottleneck.predicted;
-  const bnVerdict = bn.present ? "ОБНАРУЖЕНО" : "НЕТ";
-  const bnCls = bn.present ? "v-bad":"v-ok";
-  html += `<div class="card">
-    <h3>Узкое место (bottleneck)
-      <span><span class="verdict ${bnCls}">${bnVerdict}</span>
-      <span class="sub" style="display:inline"> P=${pct(m.bottleneck.probability)}</span></span>
-    </h3>
-    <div class="sub">Перегрузка критических узлов (router/firewall): суммарный throughput превышает bandwidth.</div>`;
-  if(bn.present){
-    html += `<div class="tbl-wrap"><table><thead><tr>
-      <th>Узел</th><th>Тип</th><th>Throughput</th><th>Bandwidth</th><th>Ratio</th><th>Перегруз</th></tr></thead><tbody>`;
-    bn.offending_nodes.forEach(n=>{
-      html += `<tr><td>${n.id}</td><td>${n.type}</td><td>${n.throughput}</td>
-        <td>${n.bandwidth}</td><td>${n.ratio}</td><td style="color:var(--bad)">+${n.overshoot}</td></tr>`;
-    });
-    html += `</tbody></table></div>`;
-  } else {
-    html += `<div class="sub" style="margin:0">Все критические узлы имеют запас пропускной способности.</div>`;
-  }
-  html += `</div>`;
+  // -------------------------------------------------------
+  // Bottleneck prediction
+  // -------------------------------------------------------
 
-  // security card
-  const sec = h.security, secCls = sec.class===0?"v-ok": sec.class===1?"v-warn":"v-bad";
-  html += `<div class="card">
-    <h3>Безопасность (security_flaw)
-      <span><span class="verdict ${secCls}">класс ${sec.class}</span>
-      <span class="sub" style="display:inline"> модель: класс ${secWin}</span></span>
-    </h3>
-    <div class="sub">Распределение вероятностей модели по классам {0,1,2}:</div>
-    <div class="probs">`;
-  secProbs.forEach((p,i)=>{
-    html += `<div class="prob ${i===secWin?'win':''}">
-      <div>класс ${i}: ${pct(p)}</div><div class="bar"><i style="width:${Math.round(p*100)}%"></i></div></div>`;
+  const bnDetected = bnPred === 1;
+
+  html += `
+    <div class="card">
+      <h3>
+        Bottleneck
+        <span class="verdict ${bnDetected ? "v-bad" : "v-ok"}">
+          ${bnDetected ? "ОБНАРУЖЕНО" : "НЕ ОБНАРУЖЕНО"}
+        </span>
+      </h3>
+
+      <div class="sub">
+        Предсказание GNN: класс ${bnPred}.
+        P(bottleneck) = ${pct(bnProb)}.
+      </div>
+
+      <div class="sub">
+        Текущая архитектура модели определяет наличие
+        bottleneck на уровне всей топологии, но пока
+        не локализует конкретный узел.
+      </div>
+    </div>
+  `;
+
+  // -------------------------------------------------------
+  // Security classification
+  // -------------------------------------------------------
+
+  const secCls =
+    secWin === 0 ? "v-ok" :
+    secWin === 1 ? "v-warn" :
+    "v-bad";
+
+  html += `
+    <div class="card">
+      <h3>
+        Security
+        <span class="verdict ${secCls}">
+          КЛАСС ${secWin}
+        </span>
+      </h3>
+
+      <div class="sub">
+        ${m.security.label}
+      </div>
+
+      <div class="sub">
+        Распределение вероятностей GNN по классам:
+      </div>
+
+      <div class="probs">
+  `;
+
+  secProbs.forEach((p, i) => {
+    html += `
+      <div class="prob ${i === secWin ? "win" : ""}">
+        <div>Класс ${i}: ${pct(p)}</div>
+        <div class="bar">
+          <i style="width:${Math.round(p * 100)}%"></i>
+        </div>
+      </div>
+    `;
   });
-  html += `</div>`;
 
-  // issue A
-  const a = sec.issue_a;
-  html += `<div style="margin-top:.7rem"><strong>${a.present?"⚠":"✓"} ${a.label}</strong>
-    <div class="sub">${a.explanation}</div>`;
-  if(a.present) html += `<div class="sub">Затронутые хосты: <code>${a.affected_host_ids.join(", ")}</code></div>`;
-  html += `</div>`;
+  html += `
+      </div>
 
-  // issue B
-  const b = sec.issue_b;
-  html += `<div style="margin-top:.5rem"><strong>${b.present?"⚠":"✓"} ${b.label}</strong>
-    <div class="sub">${b.explanation}</div>`;
-  if(b.present){
-    html += `<div class="tbl-wrap"><table><thead><tr><th>Из</th><th>В</th><th>Типы</th><th>BW</th><th>TP</th></tr></thead><tbody>`;
-    b.edges.forEach(e=>{
-      html += `<tr><td>${e.source}</td><td>${e.target}</td><td>${e.source_type}–${e.target_type}</td>
-        <td>${e.bandwidth}</td><td>${e.throughput}</td></tr>`;
-    });
-    html += `</tbody></table></div>`;
-  }
-  html += `</div></div>`;
+      <div class="sub" style="margin-top:.7rem">
+        Класс отражает количество категорий проблем,
+        предусмотренных обучающей разметкой.
+        Модель пока не определяет конкретные типы
+        нарушений или затронутые устройства.
+      </div>
+    </div>
+  `;
 
-  // topology viz
-  html += `<div class="card"><h3>Топология</h3>`;
-  html += renderTopology(d.topology.nodes, d.topology.edges, h);
+  // -------------------------------------------------------
+  // Topology visualization
+  // -------------------------------------------------------
+
+  html += `
+    <div class="card">
+      <h3>Топология сети</h3>
+      <div class="sub">
+        Визуализация входного графа.
+        Цвета обозначают типы устройств,
+        а не степень риска.
+      </div>
+  `;
+
+  html += renderTopology(
+    d.topology.nodes,
+    d.topology.edges
+  );
+
   html += `</div>`;
 
   $("results").innerHTML = html;
 }
 
-function renderTopology(nodes, edges, h){
+function renderTopology(nodes, edges){
   if(!nodes.length) return "";
   const idType = {}; const adj = {};
   nodes.forEach(n=>{ idType[n.id]=n.type; adj[n.id]=[]; });
@@ -332,8 +392,6 @@ function renderTopology(nodes, edges, h){
   const cxOf = id => padX + x[id]*colW;
   const cyOf = id => padY + depth[id]*levelH;
 
-  const offending = new Set(h.bottleneck.offending_nodes.map(o=>o.id));
-  const prSet = new Set((h.security.issue_b.edges||[]).map(e=>[e.source,e.target].sort().join("-")));
   const isTreeEdge = (s,t)=> parent[t]===s || parent[s]===t;
 
   let svg = `<div class="topo-wrap"><svg class="topo" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
@@ -345,27 +403,91 @@ function renderTopology(nodes, edges, h){
   edges.forEach(e=>{
     const ax=cxOf(e.source), ay=cyOf(e.source), bx=cxOf(e.target), by=cyOf(e.target);
     const key=[e.source,e.target].sort().join("-");
-    const isPR=prSet.has(key), tree=isTreeEdge(e.source,e.target);
+    
     if(tree){
-      const top = ay<=by ? {x:ax,y:ay} : {x:bx,y:by};
-      const bot = ay<=by ? {x:bx,y:by} : {x:ax,y:ay};
-      const mid = top.y + (bot.y - top.y)/2;
-      const d = `M ${top.x} ${top.y} L ${top.x} ${mid} L ${bot.x} ${mid} L ${bot.x} ${bot.y}`;
-      svg += `<path d="${d}" fill="none" stroke="${isPR?'#ef4444':'#64748b'}" stroke-width="${isPR?2.6:1.6}" opacity="${isPR?1:0.75}"/>`;
+    const top = ay <= by
+        ? {x:ax,y:ay}
+        : {x:bx,y:by};
+
+    const bot = ay <= by
+        ? {x:bx,y:by}
+        : {x:ax,y:ay};
+
+    const mid = top.y + (bot.y - top.y) / 2;
+
+    const d = `
+        M ${top.x} ${top.y}
+        L ${top.x} ${mid}
+        L ${bot.x} ${mid}
+        L ${bot.x} ${bot.y}
+    `;
+
+    svg += `
+        <path
+        d="${d}"
+        fill="none"
+        stroke="#64748b"
+        stroke-width="1.6"
+        opacity="0.75"
+        />
+    `;
+
     } else {
-      svg += `<line x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" stroke="${isPR?'#ef4444':'#94a3b8'}" stroke-width="${isPR?2.2:1.2}" stroke-dasharray="${isPR?'none':'5 4'}" opacity="${isPR?0.95:0.5}"/>`;
+    svg += `
+        <line
+        x1="${ax}"
+        y1="${ay}"
+        x2="${bx}"
+        y2="${by}"
+        stroke="#94a3b8"
+        stroke-width="1.2"
+        stroke-dasharray="5 4"
+        opacity="0.5"
+        />
+    `;
     }
   });
 
-  // Nodes (with type label underneath). Offending bottleneck nodes get a
-  // red ring so the overloaded router is obvious.
+  // Nodes: neutral rendering based on node types.
   nodes.forEach(nd=>{
     const px=cxOf(nd.id), py=cyOf(nd.id); const c=TYPE_COLORS[nd.type]||"#64748b";
-    const isOff=offending.has(nd.id);
-    if(isOff) svg += `<circle cx="${px}" cy="${py}" r="${r+5}" fill="none" stroke="#ef4444" stroke-width="2"/>`;
-    svg += `<circle cx="${px}" cy="${py}" r="${r}" fill="${c}" stroke="#0b1220" stroke-width="2"/>`;
-    svg += `<text x="${px}" y="${py+3.5}" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">${nd.id}</text>`;
-    svg += `<text x="${px}" y="${py+r+13}" text-anchor="middle" font-size="8.5" fill="#94a3b8">${idType[nd.id]}</text>`;
+    nodes.forEach(nd => {
+  const px = cxOf(nd.id);
+  const py = cyOf(nd.id);
+  const c = TYPE_COLORS[nd.type] || "#64748b";
+
+  svg += `
+    <circle
+      cx="${px}"
+      cy="${py}"
+      r="${r}"
+      fill="${c}"
+      stroke="#0b1220"
+      stroke-width="2"
+    />
+  `;
+
+  svg += `
+    <text
+      x="${px}"
+      y="${py + 3.5}"
+      text-anchor="middle"
+      font-size="10"
+      fill="#fff"
+      font-weight="700"
+    >${nd.id}</text>
+  `;
+
+  svg += `
+    <text
+      x="${px}"
+      y="${py + r + 13}"
+      text-anchor="middle"
+      font-size="8.5"
+      fill="#94a3b8"
+    >${nd.type}</text>
+  `;
+});
   });
   svg += `</svg></div>`;
 
@@ -373,8 +495,6 @@ function renderTopology(nodes, edges, h){
   const present = [...new Set(nodes.map(n=>n.type))];
   svg += `<div class="legend">`;
   present.forEach(t=>{ svg += `<span><i style="background:${TYPE_COLORS[t]||'#64748b'}"></i>${t}</span>`; });
-  svg += `<span><i style="background:transparent;border:2px solid #ef4444"></i>перегруз</span>`;
-  svg += `<span><i style="background:#ef4444"></i>printer↔router</span>`;
   svg += `<span><i style="width:18px;height:0;border-top:2px dashed #94a3b8;background:transparent;border-radius:0;display:inline-block"></i>не-дерев. ребро</span>`;
   svg += `</div>`;
   return svg;

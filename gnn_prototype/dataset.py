@@ -59,8 +59,31 @@ def build_graph_data(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -
       node_map   {original id -> 0..N-1} for callers that map back to ids
       node_ids   sorted original ids
     """
-    node_ids = [n["id"] for n in nodes]
-    node_map = {nid: i for i, nid in enumerate(sorted(node_ids))}
+    if not nodes:
+        raise ValueError("Topology must contain at least one node")
+    node_ids = sorted(n["id"] for n in nodes)
+
+    if len(node_ids) != len(set(node_ids)):
+        raise ValueError("Duplicate node IDs")
+
+    node_map = {
+        node_id: index
+        for index, node_id in enumerate(node_ids)
+    }
+
+    known_node_ids = set(node_ids)
+
+    for edge in edges:
+        source = edge["source"]
+        target = edge["target"]
+
+        if source not in known_node_ids or target not in known_node_ids:
+            raise ValueError(
+                f"Edge references unknown node: "
+                f"{source} -> {target}"
+            )
+
+    sorted_nodes = sorted(nodes, key=lambda n: n["id"])
 
     # Per-node aggregates needed for enriched features.
     degree = [0] * len(node_ids)
@@ -92,7 +115,7 @@ def build_graph_data(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -
 
     # Build node feature matrix [N, 12].
     x_rows: List[List[float]] = []
-    for n in nodes:
+    for n in sorted_nodes:
         idx = node_map[n["id"]]
         onehot = [0.0] * NUM_NODE_TYPES
         tidx = TYPE_TO_INDEX.get(n["type"])
@@ -118,8 +141,26 @@ def build_graph_data(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -
         attrs.append([bw_norm[k], tp_norm[k]])          # forward
         attrs.append([bw_norm[len(edges) + k], tp_norm[len(edges) + k]])  # reverse
 
-    edge_index = torch.tensor(src_dst, dtype=torch.long).t().contiguous()
-    edge_attr = torch.tensor(attrs, dtype=torch.float32)
+    if src_dst:
+        edge_index = torch.tensor(
+            src_dst,
+            dtype=torch.long
+        ).t().contiguous()
+
+        edge_attr = torch.tensor(
+            attrs,
+            dtype=torch.float32
+        )
+    else:
+        edge_index = torch.empty(
+            (2, 0),
+            dtype=torch.long
+        )
+
+        edge_attr = torch.empty(
+            (0, 2),
+            dtype=torch.float32
+        )
 
     return {
         "x": x,

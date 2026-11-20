@@ -2,9 +2,7 @@
 
 Exposes the GNN as an expertise service: submit a LAN topology as JSON
 (`{nodes, edges}`), get back the model's predictions (score / bottleneck /
-security_flaw) together with an actionable heuristic explanation (which node
-is overloaded, which hosts are unprotected, which printer<->router edges
-violate segmentation).
+security_flaw).
 
 Run:
     python server.py                 # http://localhost:8000
@@ -23,11 +21,19 @@ import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    model_validator,
+)
 
 from dataset import NODE_TYPES, build_graph_data
 from model import NetworkGNN, SECURITY_CLASSES
-from topology_analysis import analyze_topology, summarize
+
+
+MAX_NODES = 100
+MAX_EDGES = 500
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(HERE, "best_model.pt")
@@ -46,27 +52,88 @@ print(f"[server] loaded model from {MODEL_PATH}")
 
 
 # --- Request / response schemas ------------------------------------------------
+
 class Node(BaseModel):
-    id: int
+    model_config = ConfigDict(extra="forbid")
+
+    id: int = Field(strict=True)
     type: str
 
 
 class Edge(BaseModel):
-    source: int
-    target: int
-    bandwidth: int
-    throughput: int
+    model_config = ConfigDict(extra="forbid")
+
+    source: int = Field(strict=True)
+    target: int = Field(strict=True)
+
+    bandwidth: int = Field(gt=0, strict=True)
+    throughput: int = Field(ge=0, strict=True)
 
 
 class TopologyRequest(BaseModel):
-    nodes: List[Node] = Field(..., min_length=1)
-    edges: List[Edge] = Field(default_factory=list)
-    metadata: Optional[Dict[str, Any]] = None  # ignored -- labels are predicted, not read
+    model_config = ConfigDict(extra="forbid")
+
+    nodes: List[Node] = Field(
+        min_length=1,
+        max_length=MAX_NODES,
+    )
+
+    edges: List[Edge] = Field(
+        default_factory=list,
+        max_length=MAX_EDGES,
+    )
+
+
+    @model_validator(mode="after")
+    def validate_topology(self) -> "TopologyRequest":
+        """Validate graph-level constraints."""
+
+        # 1. Check node ID uniqueness.
+        node_ids = [node.id for node in self.nodes]
+
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("Duplicate node IDs are not allowed")
+
+        known_ids = set(node_ids)
+
+        # 2. Validate edge endpoints and topology structure.
+        seen_edges = set()
+
+        for edge in self.edges:
+            source = edge.source
+            target = edge.target
+
+            # Both endpoints must exist.
+            if source not in known_ids or target not in known_ids:
+                raise ValueError(
+                    f"Edge references unknown node: "
+                    f"{source} -> {target}"
+                )
+
+            # No self-loops.
+            if source == target:
+                raise ValueError(
+                    f"Self-loop is not allowed: node {source}"
+                )
+
+            # Undirected edge canonicalization.
+            edge_key = (min(source, target), max(source, target))
+
+            if edge_key in seen_edges:
+                raise ValueError(
+                    f"Duplicate edge is not allowed: "
+                    f"{source} <-> {target}"
+                )
+
+            seen_edges.add(edge_key)
+
+        return self
+
 
 
 app = FastAPI(
     title="Linktelligence GNN Expertise API",
-    description="Submit a LAN topology, get model predictions + heuristic analysis.",
+    description="Submit a LAN topology and get GNN model predictions.",
     version="1.0.0",
 )
 
@@ -106,91 +173,127 @@ def _run_model(nodes_raw: List[Node], edges_raw: List[Edge]) -> Dict[str, Any]:
         "score": round(score_v, 3),
         "bottleneck": {
             "predicted": int(bn_probs.argmax().item()),
-            "probability": round(float(bn_probs[1].item()), 3),  # P(bottleneck present)
+            "probability": round(float(bn_probs[1].item()), 6),  # P(bottleneck present)
         },
         "security": {
             "predicted_class": int(sec_probs.argmax().item()),
             "label": SECURITY_LABELS.get(int(sec_probs.argmax().item()), "?"),
-            "probabilities": [round(float(p), 3) for p in sec_probs.tolist()],
+            "probabilities": [round(float(p), 6) for p in sec_probs.tolist()],
         },
     }
 
 
+def summarize_predictions(model_out: Dict[str, Any]) -> str:
+    """Generate a textual summary exclusively from GNN predictions."""
+
+    score = model_out["score"]
+
+    bottleneck = model_out["bottleneck"]
+    security = model_out["security"]
+
+    bn_probability = bottleneck["probability"]
+    bn_predicted = bottleneck["predicted"]
+
+    security_class = security["predicted_class"]
+    security_label = security["label"]
+
+    bottleneck_text = (
+        "GNN обнаружила признаки bottleneck."
+        if bn_predicted == 1
+        else "GNN не обнаружила признаки bottleneck."
+    )
+
+    return (
+        f"Оценка качества по GNN: {score:.2f}/1.00. "
+        f"{bottleneck_text} "
+        f"P(bottleneck)={bn_probability:.1%}. "
+        f"Класс безопасности: {security_class} — {security_label}."
+    )
+
 @app.post("/api/analyze")
 def analyze(req: TopologyRequest) -> JSONResponse:
+    """Analyze topology exclusively using the trained GNN."""
+
     bad = _validate_types(req.nodes)
+
     if bad:
         raise HTTPException(
             status_code=422,
             detail=f"Unknown node type(s): {bad}. Allowed: {NODE_TYPES}",
         )
 
-    # Edge endpoints must reference existing node ids.
-    ids = {n.id for n in req.nodes}
-    dangling = [
-        {"edge": e.model_dump(), "missing": {e.source, e.target} - ids}
-        for e in req.edges
-        if e.source not in ids or e.target not in ids
+    nodes = [
+        node.model_dump()
+        for node in req.nodes
     ]
-    if dangling:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Edge endpoint(s) reference unknown node id(s): {dangling}",
-        )
 
-    nodes = [n.model_dump() for n in req.nodes]
-    edges = [e.model_dump() for e in req.edges]
+    edges = [
+        edge.model_dump()
+        for edge in req.edges
+    ]
 
+    # The only analysis engine.
     model_out = _run_model(req.nodes, req.edges)
-    heuristic = analyze_topology(nodes, edges)
-    summary = summarize(heuristic)
+
+    # Text is generated from model predictions only.
+    summary = summarize_predictions(model_out)
 
     return JSONResponse({
         "model": model_out,
-        "heuristic": heuristic,
         "summary": summary,
-        "topology": {"nodes": nodes, "edges": edges},
+        "topology": {
+            "nodes": nodes,
+            "edges": edges,
+        },
     })
 
-
 def _pick_sample() -> Optional[Dict[str, Any]]:
-    """Return an interesting sample topology (security_flaw==2 preferred).
+    """Return a demo topology without inspecting its labels."""
 
-    Scans data/ once for a sample that exercises both security issues; falls
-    back to the first sample. Returns the raw JSON (nodes, edges, metadata).
-    """
     if not os.path.isdir(DATA_DIR):
         return None
-    fallback = None
+
     for name in sorted(os.listdir(DATA_DIR)):
         if not name.endswith(".json"):
             continue
-        with open(os.path.join(DATA_DIR, name)) as f:
-            d = json.load(f)
-        if fallback is None:
-            fallback = d
-        meta = d.get("metadata", {})
-        # Prefer a sample showing both security issues (class 2) + a bottleneck.
-        if meta.get("security_flaw") == 2 and meta.get("bottleneck") == 1:
-            d["_source_file"] = name
-            return d
-    if fallback is not None:
-        fallback["_source_file"] = "sample_0001.json"
-    return fallback
+
+        file_path = os.path.join(DATA_DIR, name)
+
+        try:
+            with open(file_path, "r") as f:
+                data = json.load(f)
+
+            if not isinstance(data, dict):
+                continue
+
+            if "nodes" not in data or "edges" not in data:
+                continue
+
+            data["_source_file"] = name
+            return data
+
+        except (OSError, json.JSONDecodeError):
+            continue
+
+    return None
 
 
 @app.get("/api/sample")
 def sample() -> JSONResponse:
-    """A demo topology the frontend can load into the editor."""
-    d = _pick_sample()
-    if d is None:
-        raise HTTPException(status_code=404, detail="no sample data available")
-    meta = d.get("metadata")
+    """Return a demo topology without exposing training labels."""
+
+    data = _pick_sample()
+
+    if data is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No sample data available",
+        )
+
     return JSONResponse({
-        "nodes": d["nodes"],
-        "edges": d["edges"],
-        "metadata": meta,  # known labels, for reference only
-        "source_file": d.get("_source_file"),
+        "nodes": data["nodes"],
+        "edges": data["edges"],
+        "source_file": data["_source_file"],
     })
 
 

@@ -16,13 +16,14 @@ them from `data['metadata']`, not the top level.
 """
 from __future__ import annotations
 
+
 import json
 import os
 from typing import Any, Dict, List, Tuple
 
 import networkx as nx
 import numpy as np
-
+from heuristics import calculate_labels
 # --- Configuration ---
 NUM_SAMPLES = 2000
 NODE_TYPES = ["router", "switch", "printer", "host", "firewall", "ids_ips", "l3_switch"]
@@ -75,65 +76,6 @@ def assign_attributes(G: nx.Graph, rng: np.random.Generator) -> Tuple[List[Dict[
     return node_data, edge_data
 
 
-def calculate_heuristics(
-    G: nx.Graph, nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]
-) -> Dict[str, float]:
-    """Compute the three labels from deterministic heuristic rules.
-
-    score          : float in [0, 1] (regression target).
-    bottleneck     : int {0, 1}      (any firewall/router whose incident
-                                      throughput sum exceeds its incident
-                                      bandwidth sum).
-    security_flaw  : int {0, 1, 2}   (count of distinct issue types:
-                                      +1 if a host exists with neither
-                                      firewall nor ids_ips; +1 if any
-                                      printer<->router direct edge).
-    """
-    score = 1.0
-    bottleneck = 0
-    security_issues = 0
-
-    node_types = {d["id"]: d["type"] for d in nodes}
-
-    # O(1) edge lookup keyed by an unordered endpoint pair.
-    edge_lookup = {frozenset((e["source"], e["target"])): e for e in edges}
-
-    # --- Bottleneck check: aggregate per critical node (firewall/router) ---
-    critical_nodes = [n for n, t in node_types.items() if t in ("firewall", "router")]
-    for node in critical_nodes:
-        total_throughput = 0
-        incident_bandwidth = 0
-        for neighbor in G.neighbors(node):
-            e = edge_lookup.get(frozenset((node, neighbor)))
-            if e is not None:
-                total_throughput += e["throughput"]
-                incident_bandwidth += e["bandwidth"]
-        if total_throughput > incident_bandwidth:
-            bottleneck = 1
-            score -= 0.3
-
-    # --- Security issue A: host without firewall and without ids_ips ---
-    has_host = any(t == "host" for t in node_types.values())
-    has_firewall = any(t == "firewall" for t in node_types.values())
-    has_ids_ips = any(t == "ids_ips" for t in node_types.values())
-    if has_host and not has_firewall and not has_ids_ips:
-        security_issues += 1
-        score -= 0.4
-
-    # --- Security issue B: any printer<->router direct connection ---
-    for u, v in G.edges():
-        tu, tv = node_types.get(u), node_types.get(v)
-        if {tu, tv} == {"printer", "router"}:
-            security_issues += 1
-            score -= 0.2
-            break  # one occurrence is enough to flag the issue type
-
-    return {
-        "score": float(max(0.0, min(1.0, score))),
-        "bottleneck": int(bottleneck),
-        "security_flaw": int(security_issues),
-    }
-
 
 def main() -> None:
     rng = np.random.default_rng(SEED)
@@ -145,7 +87,7 @@ def main() -> None:
         num_nodes = int(rng.integers(5, 20))
         G = generate_random_graph(num_nodes, rng)
         node_data, edge_data = assign_attributes(G, rng)
-        heuristics = calculate_heuristics(G, node_data, edge_data)
+        heuristics = calculate_labels(node_data, edge_data)
 
         sample_record = {
             "sample_id": i + 1,

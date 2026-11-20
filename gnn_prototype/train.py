@@ -41,6 +41,7 @@ Reproducible stratified split:
 """
 from __future__ import annotations
 
+import math
 import argparse
 import warnings
 from collections import Counter
@@ -121,23 +122,137 @@ def _class_weights(dataset, col: int, num_classes: int, cap: float) -> torch.Ten
     return weights, dict(sorted(counts.items()))
 
 
-def _stratified_split(dataset, train_split: float, seed: int):
-    """Stratified train/test split on security_flaw (the rarest label).
 
-    Stratifying on security_flaw guarantees class-2 (~11 samples) appears
-    in BOTH splits every run, instead of randomly landing entirely in train
-    (which made security macro-F1 swing 0.62<->0.86 between runs and left
-    class-2 with support=0). bottleneck has ~88 positives, so random
-    within-stratum is fine for it. Returns (train_subset, test_subset).
+def _stratified_split(
+    dataset,
+    train_split: float,
+    validation_split: float,
+    test_split: float,
+    seed: int,
+):
+    """Create reproducible stratified train/validation/test subsets.
+
+    Stratification is performed using security_flaw, the rarest target.
+
+    Uses two-stage splitting:
+        1. Separate test from train+validation.
+        2. Separate validation from train.
+
+    All three subsets retain representation of every observed class.
     """
-    sec_labels = [int(dataset[i].y[0, 2]) for i in range(len(dataset))]
-    sss = StratifiedShuffleSplit(n_splits=1, test_size=1.0 - train_split,
-                                 random_state=seed)
-    train_idx, test_idx = next(sss.split(range(len(dataset)), sec_labels))
-    return Subset(dataset, train_idx), Subset(dataset, test_idx)
+
+    splits = (train_split, validation_split, test_split)
+
+    if any(split <= 0 or split >= 1 for split in splits):
+        raise ValueError("All split proportions must be between 0 and 1")
+
+    if not math.isclose(sum(splits), 1.0, abs_tol=1e-8):
+        raise ValueError(
+            f"Split proportions must sum to 1.0, got {sum(splits):.4f}"
+        )
+
+    indices = list(range(len(dataset)))
+
+    sec_labels = [
+        int(dataset[i].y[0, 2])
+        for i in indices
+    ]
+
+    class_counts = Counter(sec_labels)
+
+    # At least one sample of each observed class must be present
+    # in train, validation and test.
+    insufficient = {
+        label: count
+        for label, count in class_counts.items()
+        if count < 3
+    }
+
+    if insufficient:
+        raise ValueError(
+            "Cannot stratify into three subsets: "
+            f"some classes have fewer than 3 samples: {insufficient}"
+        )
+
+    try:
+        # Stage 1: isolate the test set.
+        test_splitter = StratifiedShuffleSplit(
+            n_splits=1,
+            test_size=test_split,
+            random_state=seed,
+        )
+
+        train_val_idx, test_idx = next(
+            test_splitter.split(indices, sec_labels)
+        )
+
+        # Stage 2: divide remaining samples into train and validation.
+        val_relative_size = validation_split / (
+            train_split + validation_split
+        )
+
+        train_val_labels = [
+            sec_labels[int(idx)]
+            for idx in train_val_idx
+        ]
+
+        val_splitter = StratifiedShuffleSplit(
+            n_splits=1,
+            test_size=val_relative_size,
+            random_state=seed + 1,
+        )
+
+        train_relative_idx, val_relative_idx = next(
+            val_splitter.split(train_val_idx, train_val_labels)
+        )
+
+        train_idx = [
+            int(train_val_idx[i])
+            for i in train_relative_idx
+        ]
+
+        val_idx = [
+            int(train_val_idx[i])
+            for i in val_relative_idx
+        ]
+
+    except ValueError as exc:
+        raise ValueError(
+            "Unable to create stratified train/validation/test split. "
+            f"Dataset size: {len(dataset)}, "
+            f"class counts: {dict(class_counts)}. "
+            f"Original error: {exc}"
+        ) from exc
+
+    return (
+        Subset(dataset, train_idx),
+        Subset(dataset, val_idx),
+        Subset(dataset, [int(i) for i in test_idx]),
+    )
 
 
-def train(epochs, data_root, model_path, batch_size, train_split, weight_cap, patience, seed):
+def get_class_distribution(dataset, col=2):
+    return dict(
+        sorted(
+            Counter(
+                int(dataset[i].y[0, col])
+                for i in range(len(dataset))
+            ).items()
+        )
+    )
+
+def train(
+    epochs,
+    data_root,
+    model_path,
+    batch_size,
+    train_split,
+    validation_split,
+    test_split,
+    weight_cap,
+    patience,
+    seed,
+):
     print("--- Starting Model Training ---")
 
     # Seed everything for reproducible splits AND weight init; without this,
@@ -147,9 +262,29 @@ def train(epochs, data_root, model_path, batch_size, train_split, weight_cap, pa
     dataset = NetworkDataset(root=data_root)
     print(f"Loaded {len(dataset)} samples. (seed={seed})")
 
-    train_dataset, test_dataset = _stratified_split(dataset, train_split, seed)
-    print(f"Split: train={len(train_dataset)} test={len(test_dataset)} "
-          f"(stratified on security_flaw)")
+    train_dataset, val_dataset, test_dataset = _stratified_split(
+        dataset=dataset,
+        train_split=train_split,
+        validation_split=validation_split,
+        test_split=test_split,
+        seed=seed,
+    )
+
+    print(
+        "Security class distribution:"
+    )
+
+    print(
+        f"Train:      {get_class_distribution(train_dataset)}"
+    )
+
+    print(
+        f"Validation: {get_class_distribution(val_dataset)}"
+    )
+
+    print(
+        f"Test:       {get_class_distribution(test_dataset)}"
+    )
 
     # --- Class weights derived from the training split ---
     bn_w, bn_counts = _class_weights(train_dataset, col=1, num_classes=2, cap=weight_cap)
@@ -164,64 +299,199 @@ def train(epochs, data_root, model_path, batch_size, train_split, weight_cap, pa
     bottleneck_criterion = nn.CrossEntropyLoss(weight=bn_w)
     security_criterion = nn.CrossEntropyLoss(weight=sec_w)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+    )
 
-    best_loss = float("inf")
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+    )
+
+
+    best_val_loss = float("inf")
     best_epoch = 0
     stale = 0
+
     for epoch in range(epochs):
-        # --- Train ---
+
+        # -------------------------------------------------
+        # 1. TRAIN
+        # -------------------------------------------------
+
         model.train()
         total_train_loss = 0.0
+
         for data in train_loader:
             optimizer.zero_grad()
-            score, bottleneck, security = model(data.x, data.edge_index, data.edge_attr, data.batch)
+
+            score, bottleneck, security = model(
+                data.x,
+                data.edge_index,
+                data.edge_attr,
+                data.batch,
+            )
+
             loss = (
                 score_criterion(score, data.y[:, 0:1])
-                + bottleneck_criterion(bottleneck, data.y[:, 1].long())
-                + security_criterion(security, data.y[:, 2].long())
+                + bottleneck_criterion(
+                    bottleneck,
+                    data.y[:, 1].long(),
+                )
+                + security_criterion(
+                    security,
+                    data.y[:, 2].long(),
+                )
             )
+
             loss.backward()
             optimizer.step()
-            total_train_loss += loss.item() * data.num_graphs
-        avg_train_loss = total_train_loss / max(1, len(train_dataset))
 
-        # --- Eval ---
-        ev = _evaluate(model, test_loader, score_criterion, bottleneck_criterion, security_criterion)
-        print(
-            f"Epoch {epoch + 1:3d}/{epochs} | "
-            f"train {avg_train_loss:.4f} | test {ev['avg_loss']:.4f} | "
-            f"bn acc/bal/f1 {ev['bn_acc']:.2f}/{ev['bn_bal']:.2f}/{ev['bn_f1']:.2f} | "
-            f"sec acc/bal/f1 {ev['sec_acc']:.2f}/{ev['sec_bal']:.2f}/{ev['sec_f1']:.2f}"
+            total_train_loss += loss.item() * data.num_graphs
+
+        avg_train_loss = (
+            total_train_loss / max(1, len(train_dataset))
         )
 
-        if ev["avg_loss"] < best_loss:
-            best_loss = ev["avg_loss"]
+        # -------------------------------------------------
+        # 2. VALIDATION
+        # -------------------------------------------------
+
+        val_metrics = _evaluate(
+            model,
+            val_loader,
+            score_criterion,
+            bottleneck_criterion,
+            security_criterion,
+        )
+
+        print(
+            f"Epoch {epoch + 1:3d}/{epochs} | "
+            f"train {avg_train_loss:.4f} | "
+            f"val {val_metrics['avg_loss']:.4f} | "
+            f"bn acc/bal/f1 "
+            f"{val_metrics['bn_acc']:.2f}/"
+            f"{val_metrics['bn_bal']:.2f}/"
+            f"{val_metrics['bn_f1']:.2f} | "
+            f"sec acc/bal/f1 "
+            f"{val_metrics['sec_acc']:.2f}/"
+            f"{val_metrics['sec_bal']:.2f}/"
+            f"{val_metrics['sec_f1']:.2f}"
+        )
+
+        # -------------------------------------------------
+        # 3. CHECKPOINT SELECTION
+        # -------------------------------------------------
+
+        if val_metrics["avg_loss"] < best_val_loss:
+
+            best_val_loss = val_metrics["avg_loss"]
             best_epoch = epoch + 1
             stale = 0
+
             torch.save(model.state_dict(), model_path)
-            print(f"  -> saved {model_path} (new best test loss)")
+
+            print(
+                f"  -> saved {model_path} "
+                "(new best validation loss)"
+            )
+
         else:
             stale += 1
+
             if patience and stale >= patience:
-                print(f"  -> early stopping: no test-loss improvement for {patience} epochs "
-                      f"(best epoch {best_epoch}, loss {best_loss:.4f})")
+                print(
+                    f"  -> early stopping: no validation-loss "
+                    f"improvement for {patience} epochs "
+                    f"(best epoch {best_epoch}, "
+                    f"loss {best_val_loss:.4f})"
+                )
                 break
 
-    # --- Final report from the RELOADED best checkpoint (matches the disk artifact) ---
-    print(f"\n--- best checkpoint: epoch {best_epoch} | test loss {best_loss:.4f} ---")
-    best_model = NetworkGNN.from_pretrained(model_path)
-    ev_best = _evaluate(best_model, test_loader, score_criterion, bottleneck_criterion, security_criterion)
-    print(f"bn acc/bal/f1 {ev_best['bn_acc']:.2f}/{ev_best['bn_bal']:.2f}/{ev_best['bn_f1']:.2f} | "
-          f"sec acc/bal/f1 {ev_best['sec_acc']:.2f}/{ev_best['sec_bal']:.2f}/{ev_best['sec_f1']:.2f}")
-    print("\n--- classification_report (best checkpoint, test split) ---")
-    print("[bottleneck]")
-    print(classification_report(ev_best["bn_y"], ev_best["bn_preds"], zero_division=0))
-    print("[security_flaw]")
-    print(classification_report(ev_best["sec_y"], ev_best["sec_preds"], zero_division=0))
+    # -----------------------------------------------------
+    # 4. LOAD BEST CHECKPOINT
+    # -----------------------------------------------------
 
-    print(f"--- Training Complete | best test loss {best_loss:.4f} at epoch {best_epoch} ---")
+    if best_epoch == 0:
+        raise RuntimeError(
+            "Training finished without producing a valid checkpoint"
+        )
+
+    print(
+        f"\n--- Best checkpoint: epoch {best_epoch} | "
+        f"validation loss {best_val_loss:.4f} ---"
+    )
+
+    best_model = NetworkGNN.from_pretrained(model_path)
+
+    # -----------------------------------------------------
+    # 5. FINAL TEST EVALUATION
+    # -----------------------------------------------------
+
+    # Test data is evaluated only once, after model selection.
+    test_metrics = _evaluate(
+        best_model,
+        test_loader,
+        score_criterion,
+        bottleneck_criterion,
+        security_criterion,
+    )
+
+    print("\n--- FINAL TEST RESULTS ---")
+
+    print(
+        f"Test loss: {test_metrics['avg_loss']:.4f}"
+    )
+
+    print(
+        f"bn acc/bal/f1 "
+        f"{test_metrics['bn_acc']:.2f}/"
+        f"{test_metrics['bn_bal']:.2f}/"
+        f"{test_metrics['bn_f1']:.2f}"
+    )
+
+    print(
+        f"sec acc/bal/f1 "
+        f"{test_metrics['sec_acc']:.2f}/"
+        f"{test_metrics['sec_bal']:.2f}/"
+        f"{test_metrics['sec_f1']:.2f}"
+    )
+
+    print("\n--- classification_report (test split) ---")
+
+    print("[bottleneck]")
+    print(
+        classification_report(
+            test_metrics["bn_y"],
+            test_metrics["bn_preds"],
+            zero_division=0,
+        )
+    )
+
+    print("[security_flaw]")
+    print(
+        classification_report(
+            test_metrics["sec_y"],
+            test_metrics["sec_preds"],
+            zero_division=0,
+        )
+    )
+
+    print(
+        f"--- Training Complete | "
+        f"best validation loss {best_val_loss:.4f} "
+        f"at epoch {best_epoch} ---"
+    )
+
 
 
 def main():
@@ -230,7 +500,9 @@ def main():
     ap.add_argument("--data-root", default=".")
     ap.add_argument("--model-path", default="best_model.pt")
     ap.add_argument("--batch-size", type=int, default=32)
-    ap.add_argument("--train-split", type=float, default=0.8)
+    ap.add_argument("--train-split", type=float, default=0.7)
+    ap.add_argument("--validation-split", type=float, default=0.15)
+    ap.add_argument("--test-split", type=float, default=0.15)
     ap.add_argument("--weight-cap", type=float, default=12.0,
                     help="clamp for rare-class inverse-frequency weights")
     ap.add_argument("--patience", type=int, default=15,
@@ -244,6 +516,8 @@ def main():
         model_path=args.model_path,
         batch_size=args.batch_size,
         train_split=args.train_split,
+        validation_split=args.validation_split,
+        test_split=args.test_split,
         weight_cap=args.weight_cap,
         patience=args.patience,
         seed=args.seed,
