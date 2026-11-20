@@ -1,0 +1,281 @@
+{
+  "report_meta": {
+    "schema_version": "2.0.0",
+    "min_compatible_version": "2.0.0"
+  },
+  "plan_id": "88404f5e59f6f42f",
+  "detected_languages": [
+    "python"
+  ],
+  "validation_inference": {
+    "enabled": true,
+    "suggested_build": null,
+    "suggested_lint": null
+  },
+  "task_counts": {
+    "total": 6,
+    "completed": 4,
+    "failed": 1,
+    "pending_or_inflight": 1
+  },
+  "quality": {
+    "total_findings": 43,
+    "critical_findings": 4,
+    "consistency_findings": 30,
+    "analyzer_confidence_summary": {
+      "heuristic": {
+        "count": 33,
+        "avg_confidence": 0.643
+      },
+      "llm": {
+        "count": 4,
+        "avg_confidence": 0.65
+      },
+      "static": {
+        "count": 6,
+        "avg_confidence": 1.0
+      }
+    }
+  },
+  "preflight": {
+    "fit": true,
+    "estimated_prompt_tokens": 1569,
+    "target_context_tokens": 55705,
+    "reserved_tokens": 256,
+    "chunk_count": 1,
+    "fallback_chain": [
+      "split_sections",
+      "summarize_then_decompose",
+      "fail_fast"
+    ],
+    "max_completion_cap": 16384
+  },
+  "contracts": {
+    "total_validation_runs": 8,
+    "failed_validation_runs": 3,
+    "strict_adherence_enabled": false,
+    "strict_closure_allowed_statuses": [
+      "validated"
+    ],
+    "closure_satisfied": false,
+    "unresolved_deliverables": []
+  },
+  "traceability_summary": {
+    "deliverables_total": 0,
+    "deliverables_validated": 0,
+    "architecture_alignment_score": 1.0
+  },
+  "observability": {
+    "benchmark_gate": null,
+    "kpi_snapshot_ref": null,
+    "dashboard_regression_summary": null
+  },
+  "convergence": {
+    "rework_loops": 8,
+    "tasks_with_retries": 3,
+    "escalated_tasks": 1,
+    "escalation_reason_counts": {
+      "max_attempts_reached": 1
+    }
+  },
+  "deliverables": [],
+  "efficiency": {
+    "model_switches": 9,
+    "run_events": 22,
+    "swap_count": 10,
+    "load_count": 10,
+    "unload_count": 10,
+    "analyst_report_present": true
+  },
+  "traceability": [
+    {
+      "task_id": 1,
+      "title": "Create requirements.txt",
+      "file_paths": [
+        "requirements.txt"
+      ],
+      "phase_name": "setup",
+      "deliverable_ids": [],
+      "status": "completed",
+      "dependencies": [],
+      "next_eligible_at": null,
+      "escalation_reason": null,
+      "findings_count": 4,
+      "validation_runs": [
+        {
+          "kind": "validator:aggregate",
+          "command": "validate_files",
+          "status": "completed",
+          "return_code": 0,
+          "success": 1,
+          "output": "findings=4 files=1",
+          "started_at": "2026-11-20T10:56:18.080810+00:00",
+          "finished_at": "2026-11-20T10:56:18.102665+00:00",
+          "created_at": "2026-11-20 10:56:18"
+        }
+      ]
+    },
+    {
+      "task_id": 2,
+      "title": "Create generate_data.py",
+      "file_paths": [
+        "generate_data.py"
+      ],
+      "phase_name": "data",
+      "deliverable_ids": [],
+      "status": "pending",
+      "dependencies": [],
+      "next_eligible_at": "2026-11-20 11:27:54",
+      "escalation_reason": null,
+      "findings_count": 6,
+      "validation_runs": []
+    },
+    {
+      "task_id": 3,
+      "title": "Create dataset.py",
+      "file_paths": [
+        "dataset.py"
+      ],
+      "phase_name": "data",
+      "deliverable_ids": [],
+      "status": "completed",
+      "dependencies": [],
+      "next_eligible_at": null,
+      "escalation_reason": null,
+      "findings_count": 4,
+      "validation_runs": [
+        {
+          "kind": "validator:aggregate",
+          "command": "validate_files",
+          "status": "completed",
+          "return_code": 0,
+          "success": 1,
+          "output": "findings=4 files=1",
+          "started_at": "2026-11-20T10:56:18.819596+00:00",
+          "finished_at": "2026-11-20T10:56:18.834598+00:00",
+          "created_at": "2026-11-20 10:56:18"
+        }
+      ]
+    },
+    {
+      "task_id": 4,
+      "title": "Create model.py",
+      "file_paths": [
+        "model.py"
+      ],
+      "phase_name": "model",
+      "deliverable_ids": [],
+      "status": "completed",
+      "dependencies": [],
+      "next_eligible_at": null,
+      "escalation_reason": null,
+      "findings_count": 4,
+      "validation_runs": [
+        {
+          "kind": "validator:aggregate",
+          "command": "validate_files",
+          "status": "completed",
+          "return_code": 0,
+          "success": 1,
+          "output": "findings=4 files=1",
+          "started_at": "2026-11-20T10:56:19.796992+00:00",
+          "finished_at": "2026-11-20T10:56:19.810150+00:00",
+          "created_at": "2026-11-20 10:56:19"
+        }
+      ]
+    },
+    {
+      "task_id": 5,
+      "title": "Create train.py",
+      "file_paths": [
+        "train.py"
+      ],
+      "phase_name": "training",
+      "deliverable_ids": [],
+      "status": "completed",
+      "dependencies": [
+        "Create dataset.py",
+        "Create model.py"
+      ],
+      "next_eligible_at": "2026-11-20 11:13:06",
+      "escalation_reason": null,
+      "findings_count": 9,
+      "validation_runs": [
+        {
+          "kind": "validator:aggregate",
+          "command": "validate_files",
+          "status": "completed",
+          "return_code": 0,
+          "success": 1,
+          "output": "findings=9 files=1",
+          "started_at": "2026-11-20T10:59:35.753506+00:00",
+          "finished_at": "2026-11-20T10:59:35.771062+00:00",
+          "created_at": "2026-11-20 10:59:35"
+        },
+        {
+          "kind": "validator:aggregate",
+          "command": "validate_files",
+          "status": "completed",
+          "return_code": 0,
+          "success": 1,
+          "output": "findings=9 files=1",
+          "started_at": "2026-11-20T11:17:27.291285+00:00",
+          "finished_at": "2026-11-20T11:17:27.308950+00:00",
+          "created_at": "2026-11-20 11:17:27"
+        }
+      ]
+    },
+    {
+      "task_id": 6,
+      "title": "Create test_inference.py",
+      "file_paths": [
+        "test_inference.py"
+      ],
+      "phase_name": "inference",
+      "deliverable_ids": [],
+      "status": "failed",
+      "dependencies": [
+        "Create model.py",
+        "Create dataset.py"
+      ],
+      "next_eligible_at": "2026-11-20 11:13:14",
+      "escalation_reason": "max_attempts_reached",
+      "findings_count": 16,
+      "validation_runs": [
+        {
+          "kind": "validator:aggregate",
+          "command": "validate_files",
+          "status": "completed",
+          "return_code": 0,
+          "success": 0,
+          "output": "findings=11 files=1",
+          "started_at": "2026-11-20T11:00:03.803781+00:00",
+          "finished_at": "2026-11-20T11:00:03.818346+00:00",
+          "created_at": "2026-11-20 11:00:03"
+        },
+        {
+          "kind": "validator:aggregate",
+          "command": "validate_files",
+          "status": "completed",
+          "return_code": 0,
+          "success": 0,
+          "output": "findings=11 files=1",
+          "started_at": "2026-11-20T11:12:08.667374+00:00",
+          "finished_at": "2026-11-20T11:12:08.683795+00:00",
+          "created_at": "2026-11-20 11:12:08"
+        },
+        {
+          "kind": "validator:aggregate",
+          "command": "validate_files",
+          "status": "completed",
+          "return_code": 0,
+          "success": 0,
+          "output": "findings=12 files=1",
+          "started_at": "2026-11-20T11:17:28.760403+00:00",
+          "finished_at": "2026-11-20T11:17:28.778461+00:00",
+          "created_at": "2026-11-20 11:17:28"
+        }
+      ]
+    }
+  ]
+}
