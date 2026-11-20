@@ -1,0 +1,102 @@
+{
+  "nodes": [
+    {
+      "id": 0,
+      "type": "printer"
+    },
+    {
+      "id": 1,
+      "type": "l3_switch"
+    },
+    {
+      "id": 2,
+      "type": "firewall"
+    },
+    {
+      "id": 3,
+      "type": "router"
+    },
+    {
+      "id": 4,
+      "type": "l3_switch"
+    },
+    {
+      "id": 5,
+      "type": "ids_ips"
+    }
+  ],
+  "edges": [
+    {
+      "source": 0,
+      "target": 3,
+      "bandwidth": 7203,
+      "throughput": 3933
+    },
+    {
+      "source": 0,
+      "target": 2,
+      "bandwidth": 5181,
+      "throughput": 649
+    },
+    {
+      "source": 0,
+      "target": 4,
+      "bandwidth": 8414,
+      "throughput": 2257
+    },
+    {
+      "source": 0,
+      "target": 1,
+      "bandwidth": 5053,
+      "throughput": 1860
+    },
+    {
+      "source": 1,
+      "target": 5,
+      "bandwidth": 1907,
+      "throughput": 4635
+    },
+    {
+      "source": 1,
+      "target": 3,
+      "bandwidth": 7838,
+      "throughput": 3223
+    },
+    {
+      "source": 1,
+      "target": 2,
+      "bandwidth": 4084,
+      "throughput": 4116
+    },
+    {
+      "source": 2,
+      "target": 5,
+      "bandwidth": 5500,
+      "throughput": 2223
+    },
+    {
+      "source": 2,
+      "target": 3,
+      "bandwidth": 4560,
+      "throughput": 1144
+    },
+    {
+      "source": 3,
+      "target": 5,
+      "bandwidth": 1012,
+      "throughput": 2777
+    },
+    {
+      "source": 3,
+      "target": 4,
+      "bandwidth": 8890,
+      "throughput": 328
+    },
+    {
+      "source": 4,
+      "target": 5,
+      "bandwidth": 8597,
+      "throughput": 4140
+    }
+  ]
+}

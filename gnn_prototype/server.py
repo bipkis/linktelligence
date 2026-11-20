@@ -37,7 +37,11 @@ MAX_EDGES = 500
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(HERE, "best_model.pt")
-DATA_DIR = os.path.join(HERE, "data")
+DEMO_SAMPLE_PATH = os.path.join(
+    HERE,
+    "demo",
+    "sample_topology.json",
+)
 FRONTEND = os.path.join(HERE, "static", "index.html")
 
 SECURITY_LABELS = {0: "no topology security issues", 1: "one security issue", 2: "two security issues"}
@@ -248,34 +252,31 @@ def analyze(req: TopologyRequest) -> JSONResponse:
     })
 
 def _pick_sample() -> Optional[Dict[str, Any]]:
-    """Return a demo topology without inspecting its labels."""
+    """Load the dedicated demo topology without training metadata."""
 
-    if not os.path.isdir(DATA_DIR):
+    if not os.path.isfile(DEMO_SAMPLE_PATH):
         return None
 
-    for name in sorted(os.listdir(DATA_DIR)):
-        if not name.endswith(".json"):
-            continue
+    try:
+        with open(DEMO_SAMPLE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
 
-        file_path = os.path.join(DATA_DIR, name)
+    if not isinstance(data, dict):
+        return None
 
-        try:
-            with open(file_path, "r") as f:
-                data = json.load(f)
+    nodes = data.get("nodes")
+    edges = data.get("edges")
 
-            if not isinstance(data, dict):
-                continue
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        return None
 
-            if "nodes" not in data or "edges" not in data:
-                continue
-
-            data["_source_file"] = name
-            return data
-
-        except (OSError, json.JSONDecodeError):
-            continue
-
-    return None
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "_source_file": os.path.basename(DEMO_SAMPLE_PATH),
+    }
 
 
 @app.get("/api/sample")

@@ -115,8 +115,7 @@ def test_sample_does_not_expose_training_metadata(
     tmp_path,
     monkeypatch,
 ):
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
+    sample_path = tmp_path / "sample_topology.json"
 
     sample = {
         "sample_id": 1,
@@ -132,13 +131,14 @@ def test_sample_does_not_expose_training_metadata(
         },
     }
 
-    with open(data_dir / "sample_0001.json", "w") as f:
+
+    with open(sample_path, "w", encoding="utf-8") as f:
         json.dump(sample, f)
 
     monkeypatch.setattr(
         server,
-        "DATA_DIR",
-        str(data_dir),
+        "DEMO_SAMPLE_PATH",
+        str(sample_path),
     )
 
     response = client.get("/api/sample")
@@ -247,8 +247,7 @@ def test_unknown_node_type_returns_422(client):
     assert "Unknown node type" in response.json()["detail"]
 
 def test_sample_endpoint(client, tmp_path, monkeypatch):
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
+    sample_path = tmp_path / "sample_topology.json"
 
     sample = {
         "sample_id": 1,
@@ -264,13 +263,13 @@ def test_sample_endpoint(client, tmp_path, monkeypatch):
         },
     }
 
-    with open(data_dir / "sample_0001.json", "w") as f:
+    with open(sample_path, "w", encoding="utf-8") as f:
         json.dump(sample, f)
 
     monkeypatch.setattr(
         server,
-        "DATA_DIR",
-        str(data_dir),
+        "DEMO_SAMPLE_PATH",
+        str(sample_path),
     )
 
     response = client.get("/api/sample")
@@ -280,8 +279,7 @@ def test_sample_endpoint(client, tmp_path, monkeypatch):
     data = response.json()
 
     assert len(data["nodes"]) == 2
-    assert data["source_file"] == "sample_0001.json"
+    assert data["source_file"] == "sample_topology.json"
     assert "metadata" not in data
     assert "nodes" in data
     assert "edges" in data
-    assert data["source_file"] == "sample_0001.json"
