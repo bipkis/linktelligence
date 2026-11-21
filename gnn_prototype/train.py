@@ -21,23 +21,18 @@ Imbalance handling (the reason `bn_acc` was stuck at 0.80 = always-majority):
     accuracy), which expose a constant majority predictor for what it is.
 
 Best-checkpoint correctness + early stopping:
-  * `best_model.pt` is saved only on test-loss improvement, and the final
-    `classification_report` is printed from the RELOADED best checkpoint
-    (not the last-epoch weights), so the report describes the artifact on
-    disk that `test_inference.py` will actually load.
-  * `--patience` (default 15; 0 disables) stops training when test loss has
-    not improved for that many epochs -- avoids the overfitting tail seen
-    after ~epoch 40 on 500 samples.
+  * `best_model.pt` is saved only when validation loss improves.
+    The final classification_report is printed from the reloaded
+    best checkpoint, so the report describes the artifact on disk.
+  * `--patience` stops training when validation loss has not
+    improved for the specified number of epochs.
 
 Reproducible stratified split:
-  * `--seed` (default 42) seeds both weight init and the train/test split, so
-    two runs with the same seed produce identical numbers. Without it,
-    `random_split` reshuffled every run and rare-class test support swung
-    (security_flaw==2 had 0 or 1 test samples across runs -> macro-F1
-    jumped 0.62<->0.86).
-  * The split is stratified on `security_flaw` (the rarest label), so
-    class-2 is represented in BOTH splits every run instead of randomly
-    landing entirely in train.
+  * `--seed` (default 42) seeds weight initialization and both
+    stratified split stages for reproducibility.
+  * The split is stratified on the joint target
+    `(bottleneck, security_flaw)`, preserving both classification
+    target distributions across train, validation and test.
 """
 from __future__ import annotations
 
@@ -50,7 +45,13 @@ from typing import Dict, List
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.metrics import balanced_accuracy_score, classification_report, f1_score
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    classification_report,
+    f1_score,
+    mean_absolute_error,
+    mean_squared_error,
+)
 from sklearn.model_selection import StratifiedShuffleSplit
 from torch.utils.data import Subset
 from torch_geometric.loader import DataLoader
@@ -74,6 +75,8 @@ def _evaluate(model, loader, score_criterion, bn_criterion, sec_criterion) -> Di
     sec_preds: List[int] = []
     sec_y: List[int] = []
     total_graphs = 0
+    score_preds: List[float] = []
+    score_y: List[float] = []
     with torch.no_grad():
         for data in loader:
             score, bottleneck, security = model(data.x, data.edge_index, data.edge_attr, data.batch)
@@ -88,6 +91,12 @@ def _evaluate(model, loader, score_criterion, bn_criterion, sec_criterion) -> Di
             bn_y.extend(data.y[:, 1].long().tolist())
             sec_preds.extend(security.argmax(1).tolist())
             sec_y.extend(data.y[:, 2].long().tolist())
+            score_preds.extend(
+                torch.clamp(score.squeeze(-1), 0.0, 1.0).cpu().tolist()
+            )
+            score_y.extend(
+                data.y[:, 0].cpu().tolist()
+            )
     avg_loss = total_loss / max(1, total_graphs)
     bn_acc = sum(int(p == t) for p, t in zip(bn_preds, bn_y)) / max(1, len(bn_y))
     sec_acc = sum(int(p == t) for p, t in zip(sec_preds, sec_y)) / max(1, len(sec_y))
@@ -99,6 +108,8 @@ def _evaluate(model, loader, score_criterion, bn_criterion, sec_criterion) -> Di
         "sec_preds": sec_preds, "sec_y": sec_y, "sec_acc": sec_acc,
         "sec_bal": balanced_accuracy_score(sec_y, sec_preds),
         "sec_f1": f1_score(sec_y, sec_preds, average="macro", zero_division=0),
+        "score_mae": mean_absolute_error(score_y, score_preds),
+        "score_rmse": mean_squared_error(score_y, score_preds) ** 0.5,
     }
 
 
@@ -132,13 +143,11 @@ def _stratified_split(
 ):
     """Create reproducible stratified train/validation/test subsets.
 
-    Stratification is performed using security_flaw, the rarest target.
+    Stratification uses the joint target:
+        (bottleneck, security_flaw)
 
-    Uses two-stage splitting:
-        1. Separate test from train+validation.
-        2. Separate validation from train.
-
-    All three subsets retain representation of every observed class.
+    This preserves the distribution of both classification targets
+    across all three subsets.
     """
 
     splits = (train_split, validation_split, test_split)
@@ -153,15 +162,18 @@ def _stratified_split(
 
     indices = list(range(len(dataset)))
 
-    sec_labels = [
-        int(dataset[i].y[0, 2])
+    # Encode the joint target as a single stratification label.
+    joint_labels = [
+        (
+            f"{int(dataset[i].y[0, 1])}:"
+            f"{int(dataset[i].y[0, 2])}"
+        )
         for i in indices
     ]
 
-    class_counts = Counter(sec_labels)
+    class_counts = Counter(joint_labels)
 
-    # At least one sample of each observed class must be present
-    # in train, validation and test.
+    # Every observed joint class must be represented in all subsets.
     insufficient = {
         label: count
         for label, count in class_counts.items()
@@ -171,7 +183,8 @@ def _stratified_split(
     if insufficient:
         raise ValueError(
             "Cannot stratify into three subsets: "
-            f"some classes have fewer than 3 samples: {insufficient}"
+            "some joint classes have fewer than 3 samples: "
+            f"{insufficient}"
         )
 
     try:
@@ -183,7 +196,7 @@ def _stratified_split(
         )
 
         train_val_idx, test_idx = next(
-            test_splitter.split(indices, sec_labels)
+            test_splitter.split(indices, joint_labels)
         )
 
         # Stage 2: divide remaining samples into train and validation.
@@ -192,7 +205,7 @@ def _stratified_split(
         )
 
         train_val_labels = [
-            sec_labels[int(idx)]
+            joint_labels[int(idx)]
             for idx in train_val_idx
         ]
 
@@ -220,7 +233,7 @@ def _stratified_split(
         raise ValueError(
             "Unable to create stratified train/validation/test split. "
             f"Dataset size: {len(dataset)}, "
-            f"class counts: {dict(class_counts)}. "
+            f"joint class counts: {dict(class_counts)}. "
             f"Original error: {exc}"
         ) from exc
 
@@ -385,7 +398,10 @@ def train(
             f"sec acc/bal/f1 "
             f"{val_metrics['sec_acc']:.2f}/"
             f"{val_metrics['sec_bal']:.2f}/"
-            f"{val_metrics['sec_f1']:.2f}"
+            f"{val_metrics['sec_f1']:.2f} | "
+            f"score MAE/RMSE "
+            f"{val_metrics['score_mae']:.3f}/"
+            f"{val_metrics['score_rmse']:.3f} | "
         )
 
         # -------------------------------------------------
@@ -449,6 +465,15 @@ def train(
     print("\n--- FINAL TEST RESULTS ---")
 
     print(
+    f"Score MAE:  {test_metrics['score_mae']:.4f}"
+    )
+
+    print(
+        f"Score RMSE: {test_metrics['score_rmse']:.4f}"
+    )
+
+
+    print(
         f"Test loss: {test_metrics['avg_loss']:.4f}"
     )
 
@@ -506,9 +531,9 @@ def main():
     ap.add_argument("--weight-cap", type=float, default=12.0,
                     help="clamp for rare-class inverse-frequency weights")
     ap.add_argument("--patience", type=int, default=15,
-                    help="early-stop after N epochs without test-loss improvement (0 disables)")
+                    help="early-stop after N epochs without validation-loss improvement (0 disables)")
     ap.add_argument("--seed", type=int, default=42,
-                    help="seed for the stratified split and weight init (reproducibility)")
+                    help="seed for the stratified train/validation/test split and weight initialization (reproducibility)")
     args = ap.parse_args()
     train(
         epochs=args.epochs,
