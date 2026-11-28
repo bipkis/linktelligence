@@ -30,6 +30,7 @@ from pydantic import (
 
 from dataset import NODE_TYPES, build_graph_data
 from model import NetworkGNN, SECURITY_CLASSES
+from topology_analysis import build_diagnostics
 
 
 MAX_NODES = 100
@@ -242,9 +243,31 @@ def analyze(req: TopologyRequest) -> JSONResponse:
     # Text is generated from model predictions only.
     summary = summarize_predictions(model_out)
 
+    diagnostics = build_diagnostics(nodes, edges)
+    rule_results = diagnostics["rule_results"]
+    diagnostics["comparison"] = {
+        "bottleneck": {
+            "gnn": model_out["bottleneck"]["predicted"] == 1,
+            "rules": rule_results["bottleneck"],
+            "matches": (
+                (model_out["bottleneck"]["predicted"] == 1)
+                == rule_results["bottleneck"]
+            ),
+        },
+        "security_class": {
+            "gnn": model_out["security"]["predicted_class"],
+            "rules": rule_results["security_class"],
+            "matches": (
+                model_out["security"]["predicted_class"]
+                == rule_results["security_class"]
+            ),
+        },
+    }
+
     return JSONResponse({
         "model": model_out,
         "summary": summary,
+        "diagnostics": diagnostics,
         "topology": {
             "nodes": nodes,
             "edges": edges,
