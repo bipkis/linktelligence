@@ -5,6 +5,12 @@ from collections import Counter
 
 import numpy as np
 
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
 from generate_data import generate_random_graph, assign_attributes
 from heuristics import calculate_labels
 
@@ -103,12 +109,19 @@ def apply_security_scenario(nodes, edges, rng, issue_a, issue_b):
 def main():
     rng = np.random.default_rng(SEED)
 
-    output_root = Path(
-        tempfile.mkdtemp(prefix="linktelligence-balanced-v3-")
+    output_root = (
+        Path.home()
+        / "development"
+        / "linktelligence-artifacts"
+        / "balanced-v3"
     )
 
     data_dir = output_root / "data"
-    data_dir.mkdir(parents=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove previous generated samples to avoid stale files.
+    for old_file in data_dir.glob("sample_*.json"):
+        old_file.unlink()
 
     generation_plan = []
 

@@ -15,6 +15,11 @@ from sklearn.metrics import (
 
 from torch_geometric.loader import DataLoader
 
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
 from generate_data import generate_random_graph, assign_attributes
 from experiments.generate_balanced_data import (
     SIZE_BUCKETS,
@@ -28,15 +33,28 @@ from model import NetworkGNN
 
 
 SEED = 4040
-MODEL_PATH = "/tmp/linktelligence-best-model-v3.pt"
+MODEL_PATH = str(
+    Path.home()
+    / "development"
+    / "linktelligence-artifacts"
+    / "best_model_v3.pt"
+)
 
 rng = np.random.default_rng(SEED)
 
-temp_root = Path(
-    tempfile.mkdtemp(prefix="linktelligence-v3-holdout-")
+temp_root = (
+    Path.home()
+    / "development"
+    / "linktelligence-artifacts"
+    / "v3-holdout-seed-4040"
 )
+
 data_dir = temp_root / "data"
-data_dir.mkdir(parents=True)
+data_dir.mkdir(parents=True, exist_ok=True)
+
+# Remove previous samples before deterministic regeneration.
+for old_file in data_dir.glob("sample_*.json"):
+    old_file.unlink()
 
 # ---------------------------------------------------------
 # 1. Generate independent holdout dataset
