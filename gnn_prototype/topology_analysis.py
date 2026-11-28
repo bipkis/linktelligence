@@ -194,7 +194,11 @@ def build_diagnostics(
         positive_results.append({
             "category": "security",
             "code": "no_unprotected_hosts_by_current_rule",
-            "title": "Незащищённые хосты не выявлены",
+            "title": (
+                "Проверка хостов неприменима: Host отсутствуют"
+                if not host_ids
+                else "Незащищённые хосты не выявлены по текущему правилу"
+            ),
             "description": description,
         })
 
