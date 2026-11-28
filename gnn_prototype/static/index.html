@@ -308,6 +308,9 @@ function render(d){
     </div>
   `;
 
+  // Rule-based diagnostics, separate from GNN predictions.
+  html += renderDiagnostics(d.diagnostics);
+
   // -------------------------------------------------------
   // Topology visualization
   // -------------------------------------------------------
@@ -332,171 +335,31 @@ function render(d){
   $("results").innerHTML = html;
 }
 
-function renderTopology(nodes, edges){
-  if(!nodes.length) return "";
-  const idType = {}; const adj = {};
-  nodes.forEach(n=>{ idType[n.id]=n.type; adj[n.id]=[]; });
-  edges.forEach(e=>{ adj[e.source]?.push(e.target); adj[e.target]?.push(e.source); });
-
-  // Root = router with max degree (treat it as the gateway/uplink). If no
-  // router, fall back to the highest-degree node. A router root gives the
-  // natural LAN hierarchy: router -> switches/l3 -> hosts/printers.
-  let root = nodes[0].id, bestRouter = -1, bestAny = -1;
-  nodes.forEach(n=>{
-    const d = adj[n.id].length;
-    if(n.type==="router" && d>bestRouter) bestRouter = d;
-    if(d>bestAny){ bestAny = d; root = n.id; }
-  });
-  nodes.forEach(n=>{ if(n.type==="router" && adj[n.id].length===bestRouter) root = n.id; });
-
-  // BFS spanning forest: depth, parent, tree-children. Disconnected pieces
-  // each get their own root, laid out side by side.
-  const depth={}, parent={}, children={};
-  nodes.forEach(n=>{ depth[n.id]=-1; children[n.id]=[]; });
-  const roots=[];
-  function bfs(start){
-    depth[start]=0; const q=[start];
-    while(q.length){
-      const u=q.shift();
-      for(const v of adj[u]){
-        if(depth[v]===-1){ depth[v]=depth[u]+1; parent[v]=u; children[u].push(v); q.push(v); }
-      }
-    }
-  }
+function renderTopology(nodes, edges) {
+  if (!nodes || !nodes.length) return '';
+  const adj = {}; const depth = {}; const parent = {}; const x = {};
+  nodes.forEach(n => { adj[n.id] = []; depth[n.id] = -1; });
+  edges.forEach(e => { if (adj[e.source] && adj[e.target]) { adj[e.source].push(e.target); adj[e.target].push(e.source); } });
+  const router = nodes.find(n => n.type === 'router');
+  const root = (router || nodes[0]).id;
+  const roots = [];
+  function bfs(start) { const q = [start]; depth[start] = 0; for (let i=0; i<q.length; i++) { const u=q[i]; adj[u].forEach(v => { if (depth[v] === -1) { depth[v]=depth[u]+1; parent[v]=u; q.push(v); } }); } }
   bfs(root); roots.push(root);
-  nodes.forEach(n=>{ if(depth[n.id]===-1){ bfs(n.id); roots.push(n.id); } });
-  const maxDepth = Math.max(...Object.values(depth));
-
-  // Subtree width (leaf=1, internal=sum of children) then assign x by an
-  // inorder walk so each parent sits centered over its children. Forests are
-  // placed sequentially with a 1-unit gap between them.
-  const w={};
-  function widthOf(u){
-    if(children[u].length===0){ w[u]=1; return 1; }
-    let s=0; children[u].forEach(c=> s+=widthOf(c)); w[u]=Math.max(1,s); return w[u];
-  }
-  roots.forEach(r=>widthOf(r));
-  const x={}; let cursor=0;
-  function assign(u){
-    if(children[u].length===0){ x[u]=cursor; cursor+=1; return; }
-    let first=null, last=null;
-    children[u].forEach(c=>{ const cxv=assign(c); if(first===null)first=cxv; last=cxv; });
-    x[u]=(first+last)/2;
-  }
-  roots.forEach(r=>{ assign(r); cursor+=1; });
-  const totalUnits = cursor;
-
-  const colW=66, levelH=94, padX=36, padY=28, r=13;
-  const W = Math.max(320, padX*2 + totalUnits*colW);
-  const H = padY*2 + (maxDepth+1)*levelH;
-  const cxOf = id => padX + x[id]*colW;
-  const cyOf = id => padY + depth[id]*levelH;
-
-  const isTreeEdge = (s,t)=> parent[t]===s || parent[s]===t;
-
-  let svg = `<div class="topo-wrap"><svg class="topo" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
-
-  // Tree edges -> orthogonal elbow (parent above child). Non-tree edges
-  // (mesh/cross links) -> dashed, so the hierarchy reads cleanly and the
-  // extra links are still visible as "not part of the tree". Printer<->router
-  // edges are red regardless.
-  edges.forEach(e=>{
-    const ax=cxOf(e.source), ay=cyOf(e.source), bx=cxOf(e.target), by=cyOf(e.target);
-    const key=[e.source,e.target].sort().join("-");
-    
-    if(tree){
-    const top = ay <= by
-        ? {x:ax,y:ay}
-        : {x:bx,y:by};
-
-    const bot = ay <= by
-        ? {x:bx,y:by}
-        : {x:ax,y:ay};
-
-    const mid = top.y + (bot.y - top.y) / 2;
-
-    const d = `
-        M ${top.x} ${top.y}
-        L ${top.x} ${mid}
-        L ${bot.x} ${mid}
-        L ${bot.x} ${bot.y}
-    `;
-
-    svg += `
-        <path
-        d="${d}"
-        fill="none"
-        stroke="#64748b"
-        stroke-width="1.6"
-        opacity="0.75"
-        />
-    `;
-
-    } else {
-    svg += `
-        <line
-        x1="${ax}"
-        y1="${ay}"
-        x2="${bx}"
-        y2="${by}"
-        stroke="#94a3b8"
-        stroke-width="1.2"
-        stroke-dasharray="5 4"
-        opacity="0.5"
-        />
-    `;
-    }
-  });
-
-  // Nodes: neutral rendering based on node types.
-  nodes.forEach(nd=>{
-    const px=cxOf(nd.id), py=cyOf(nd.id); const c=TYPE_COLORS[nd.type]||"#64748b";
-    nodes.forEach(nd => {
-  const px = cxOf(nd.id);
-  const py = cyOf(nd.id);
-  const c = TYPE_COLORS[nd.type] || "#64748b";
-
-  svg += `
-    <circle
-      cx="${px}"
-      cy="${py}"
-      r="${r}"
-      fill="${c}"
-      stroke="#0b1220"
-      stroke-width="2"
-    />
-  `;
-
-  svg += `
-    <text
-      x="${px}"
-      y="${py + 3.5}"
-      text-anchor="middle"
-      font-size="10"
-      fill="#fff"
-      font-weight="700"
-    >${nd.id}</text>
-  `;
-
-  svg += `
-    <text
-      x="${px}"
-      y="${py + r + 13}"
-      text-anchor="middle"
-      font-size="8.5"
-      fill="#94a3b8"
-    >${nd.type}</text>
-  `;
-});
-  });
-  svg += `</svg></div>`;
-
-  // legend
-  const present = [...new Set(nodes.map(n=>n.type))];
-  svg += `<div class="legend">`;
-  present.forEach(t=>{ svg += `<span><i style="background:${TYPE_COLORS[t]||'#64748b'}"></i>${t}</span>`; });
-  svg += `<span><i style="width:18px;height:0;border-top:2px dashed #94a3b8;background:transparent;border-radius:0;display:inline-block"></i>не-дерев. ребро</span>`;
-  svg += `</div>`;
+  nodes.forEach(n => { if (depth[n.id] === -1) { bfs(n.id); roots.push(n.id); } });
+  let cursor=0;
+  function assign(u) { const children=adj[u].filter(v => parent[v] === u); if (!children.length) { x[u]=cursor++; return x[u]; } const positions=children.map(assign); x[u]=(positions[0]+positions[positions.length-1])/2; return x[u]; }
+  roots.forEach(r => { assign(r); cursor++; });
+  const maxDepth=Math.max(...Object.values(depth));
+  const colW=78, levelH=100, padX=42, padY=32, radius=14;
+  const width=Math.max(340,padX*2+cursor*colW), height=padY*2+(maxDepth+1)*levelH;
+  const cx=id=>padX+x[id]*colW, cy=id=>padY+depth[id]*levelH;
+  const treeEdge=(s,t)=>parent[s]===t || parent[t]===s;
+  let svg='<div class="topo-wrap"><svg class="topo" viewBox="0 0 '+width+' '+height+'" preserveAspectRatio="xMidYMid meet">';
+  edges.forEach(e => { const ax=cx(e.source), ay=cy(e.source), bx=cx(e.target), by=cy(e.target); if (treeEdge(e.source,e.target)) { const top=ay<=by?{x:ax,y:ay}:{x:bx,y:by}; const bot=ay<=by?{x:bx,y:by}:{x:ax,y:ay}; const mid=(top.y+bot.y)/2; svg+='<path d="M '+top.x+' '+top.y+' L '+top.x+' '+mid+' L '+bot.x+' '+mid+' L '+bot.x+' '+bot.y+'" fill="none" stroke="#64748b" stroke-width="1.6"/>'; } else { svg+='<line x1="'+ax+'" y1="'+ay+'" x2="'+bx+'" y2="'+by+'" stroke="#94a3b8" stroke-width="1.3" stroke-dasharray="5 4"/>'; } });
+  nodes.forEach(n => { const px=cx(n.id), py=cy(n.id), color=TYPE_COLORS[n.type]||'#64748b'; svg+='<circle cx="'+px+'" cy="'+py+'" r="'+radius+'" fill="'+color+'" stroke="#0b1220" stroke-width="2"/><text x="'+px+'" y="'+(py+3.5)+'" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">'+escapeHtml(n.id)+'</text><text x="'+px+'" y="'+(py+radius+14)+'" text-anchor="middle" font-size="8.5" fill="#94a3b8">'+escapeHtml(n.type)+'</text>'; });
+  svg+='</svg></div><div class="legend">';
+  [...new Set(nodes.map(n=>n.type))].forEach(t => { svg+='<span><i style="background:'+(TYPE_COLORS[t]||'#64748b')+'"></i>'+escapeHtml(t)+'</span>'; });
+  svg+='<span><i style="width:18px;height:0;border-top:2px dashed #94a3b8;background:transparent;border-radius:0;display:inline-block"></i>Дополнительное соединение</span></div>';
   return svg;
 }
 </script>
