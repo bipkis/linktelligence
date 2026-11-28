@@ -49,6 +49,222 @@ def summarize(report: Dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+def build_diagnostics(
+    nodes: List[Dict[str, Any]],
+    edges: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build actionable rule-based diagnostics without changing GNN outputs.
+
+    The rules are the same deterministic rules used to generate training
+    labels. They explain observable topology patterns; they do not prove
+    that a device is correctly configured or that a network is secure.
+    """
+    report = analyze_topology(nodes, edges)
+    node_by_id = {node["id"]: node for node in nodes}
+
+    firewall_ids = sorted(
+        node["id"] for node in nodes if node["type"] == "firewall"
+    )
+    ids_ips_ids = sorted(
+        node["id"] for node in nodes if node["type"] == "ids_ips"
+    )
+    host_ids = sorted(
+        node["id"] for node in nodes if node["type"] == "host"
+    )
+    critical_nodes = [
+        node for node in nodes
+        if node["type"] in {"router", "firewall"}
+    ]
+
+    issues: List[Dict[str, Any]] = []
+    positive_results: List[Dict[str, Any]] = []
+
+    # Bottleneck diagnostics.
+    bottleneck = report["bottleneck"]
+    if bottleneck["present"]:
+        offending = bottleneck["offending_nodes"]
+        details = [
+            (
+                f"Устройство {node['id']} ({node['type']}): "
+                f"throughput {node['throughput']} превышает "
+                f"bandwidth {node['bandwidth']} "
+                f"на {node['overshoot']}."
+            )
+            for node in offending
+        ]
+        issues.append({
+            "category": "bottleneck",
+            "code": "critical_node_overload",
+            "title": "Перегрузка критических устройств",
+            "description": "\n".join(details),
+            "recommendation": (
+                "Проверьте фактическую загрузку интерфейсов, доступную "
+                "пропускную способность каналов и распределение трафика. "
+                "При необходимости рассмотрите увеличение пропускной "
+                "способности или перераспределение нагрузки."
+            ),
+            "affected_nodes": [
+                {"id": node["id"], "type": node["type"]}
+                for node in offending
+            ],
+            "affected_edges": [],
+        })
+    elif critical_nodes:
+        positive_results.append({
+            "category": "bottleneck",
+            "code": "no_critical_node_overload",
+            "title": "Признаки перегрузки не обнаружены",
+            "description": (
+                "По текущему правилу суммарный throughput не превышает "
+                "суммарную bandwidth ни у одного Router или Firewall."
+            ),
+        })
+    else:
+        positive_results.append({
+            "category": "bottleneck",
+            "code": "bottleneck_check_not_applicable",
+            "title": "Проверка bottleneck неприменима",
+            "description": (
+                "В топологии нет устройств Router или Firewall, "
+                "для которых предусмотрена эта проверка."
+            ),
+        })
+
+    # Security issue A: hosts without firewall and IDS/IPS.
+    issue_a = report["security"]["issue_a"]
+    if issue_a["present"]:
+        issues.append({
+            "category": "security",
+            "code": "unprotected_hosts",
+            "title": "Хосты без Firewall и IDS/IPS",
+            "description": (
+                f"Узлы Host с ID {', '.join(map(str, host_ids))} "
+                "присутствуют, но в топологии нет ни Firewall, ни IDS/IPS."
+            ),
+            "recommendation": (
+                "Проверьте архитектуру защиты пользовательских узлов. "
+                "Рассмотрите размещение межсетевого экрана и/или IDS/IPS "
+                "в соответствующих сегментах и проверьте маршруты трафика."
+            ),
+            "affected_nodes": [
+                {"id": node_id, "type": "host"}
+                for node_id in host_ids
+            ],
+            "affected_edges": [],
+        })
+    else:
+        if not host_ids:
+            protection_devices = []
+            if firewall_ids:
+                protection_devices.append(
+                    "Firewall (ID " + ", ".join(map(str, firewall_ids)) + ")"
+                )
+            if ids_ips_ids:
+                protection_devices.append(
+                    "IDS/IPS (ID " + ", ".join(map(str, ids_ips_ids)) + ")"
+                )
+            device_note = (
+                " В топологии присутствуют " + " и ".join(protection_devices) + "."
+                if protection_devices
+                else " Устройства Firewall и IDS/IPS также отсутствуют."
+            )
+            description = (
+                "Узлы типа Host в топологии отсутствуют, поэтому правило "
+                "поиска незащищённых хостов не срабатывает."
+                + device_note
+            )
+        else:
+            present_devices = []
+            if firewall_ids:
+                present_devices.append(
+                    "Firewall (ID " + ", ".join(map(str, firewall_ids)) + ")"
+                )
+            if ids_ips_ids:
+                present_devices.append(
+                    "IDS/IPS (ID " + ", ".join(map(str, ids_ips_ids)) + ")"
+                )
+            description = (
+                "В топологии присутствуют узлы Host и "
+                + " и/или ".join(present_devices)
+                + ". По текущему правилу категория незащищённых хостов "
+                "не фиксируется. Проверка не оценивает конфигурацию этих "
+                "устройств, их доступность и фактическое покрытие трафика."
+            )
+
+        positive_results.append({
+            "category": "security",
+            "code": "no_unprotected_hosts_by_current_rule",
+            "title": "Незащищённые хосты не выявлены",
+            "description": description,
+        })
+
+    # Security issue B: direct printer-router links.
+    issue_b_edges = report["security"]["issue_b"]["edges"]
+    if issue_b_edges:
+        edge_descriptions = []
+        affected_nodes_by_id = {}
+        for edge in issue_b_edges:
+            source_id = edge["source"]
+            target_id = edge["target"]
+            source_type = node_by_id[source_id]["type"]
+            target_type = node_by_id[target_id]["type"]
+            edge_descriptions.append(
+                f"Устройство {source_id} ({source_type}) напрямую "
+                f"подключено к устройству {target_id} ({target_type})."
+            )
+            affected_nodes_by_id[source_id] = {
+                "id": source_id,
+                "type": source_type,
+            }
+            affected_nodes_by_id[target_id] = {
+                "id": target_id,
+                "type": target_type,
+            }
+
+        issues.append({
+            "category": "security",
+            "code": "printer_router_connection",
+            "title": "Прямая связь принтера с маршрутизатором",
+            "description": "\n".join(edge_descriptions),
+            "recommendation": (
+                "Проверьте необходимость такого подключения и рассмотрите "
+                "сегментацию принтера через коммутатор, а также настройку "
+                "соответствующих правил доступа."
+            ),
+            "affected_nodes": list(affected_nodes_by_id.values()),
+            "affected_edges": issue_b_edges,
+        })
+    else:
+        positive_results.append({
+            "category": "security",
+            "code": "no_direct_printer_router_connection",
+            "title": "Прямых соединений Printer ↔ Router не обнаружено",
+            "description": (
+                "В топологии нет прямых рёбер между принтерами и маршрутизаторами."
+            ),
+        })
+
+    return {
+        "source": "heuristics.py",
+        "disclaimer": (
+            "Это отдельная диагностика по детерминированным правилам проекта, "
+            "а не объяснение внутренних решений GNN. Наличие Firewall или "
+            "IDS/IPS в графе само по себе не подтверждает корректность их "
+            "конфигурации и защиты сети."
+        ),
+        "issues": issues,
+        "positive_results": positive_results,
+        "rule_results": {
+            "bottleneck": bool(bottleneck["present"]),
+            "security_class": int(report["security"]["class"]),
+        },
+        "counts": {
+            "issues": len(issues),
+            "positive_results": len(positive_results),
+        },
+    }
+
+
 if __name__ == "__main__":
     # Self-test on a tiny risky topology: host w/o firewall + printer-router edge.
     demo_nodes = [
