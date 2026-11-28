@@ -362,6 +362,31 @@ function renderTopology(nodes, edges) {
   svg+='<span><i style="width:18px;height:0;border-top:2px dashed #94a3b8;background:transparent;border-radius:0;display:inline-block"></i>Дополнительное соединение</span></div>';
   return svg;
 }
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+function renderDiagnostics(d) {
+  if (!d) return '<div class="card"><h3>Диагностика</h3><div class="sub">Отчёт не получен.</div></div>';
+  const label = c => c === 'security' ? 'Security' : c === 'bottleneck' ? 'Bottleneck' : escapeHtml(c);
+  let out = '<div class="card"><h3>Обнаруженные проблемы</h3><div class="sub">Отдельная проверка по правилам проекта (heuristics.py), не объяснение решений GNN.</div>';
+  if (!d.issues || !d.issues.length) out += '<div class="sub">Проблем по текущим правилам не обнаружено.</div>';
+  (d.issues || []).forEach(issue => {
+    const affected = (issue.affected_nodes || []).map(n => 'Устройство ' + escapeHtml(n.id) + ' (' + escapeHtml(n.type) + ')').join(', ');
+    out += '<div class="card"><h3>' + label(issue.category) + '<span class="verdict v-bad">ТРЕБУЕТ ВНИМАНИЯ</span></h3><strong>' + escapeHtml(issue.title) + '</strong><div class="sub">' + escapeHtml(issue.description).replace(/\n/g, '<br>') + '</div>';
+    if (affected) out += '<div class="sub">Затронутые устройства: ' + affected + '</div>';
+    if (issue.recommendation) out += '<p><strong>Рекомендация:</strong> ' + escapeHtml(issue.recommendation) + '</p>';
+    out += '</div>';
+  });
+  out += '<h3 style="margin-top:1rem">Положительные результаты</h3>';
+  if (!d.positive_results || !d.positive_results.length) out += '<div class="sub">Положительных проверок нет.</div>';
+  (d.positive_results || []).forEach(item => { out += '<div class="sub" style="margin:.55rem 0"><span class="verdict v-ok">' + label(item.category) + '</span> <strong>' + escapeHtml(item.title) + '</strong><div>' + escapeHtml(item.description) + '</div></div>'; });
+  if (d.comparison) {
+    const ok = d.comparison.bottleneck.matches && d.comparison.security_class.matches;
+    out += '<div class="sub" style="margin-top:.8rem">Сверка GNN с правилами: <span class="verdict ' + (ok ? 'v-ok' : 'v-warn') + '">' + (ok ? 'СОВПАДЕНИЕ' : 'ЕСТЬ РАСХОЖДЕНИЯ') + '</span><div>Bottleneck: GNN — ' + (d.comparison.bottleneck.gnn ? 'да' : 'нет') + ', правила — ' + (d.comparison.bottleneck.rules ? 'да' : 'нет') + '.</div><div>Security class: GNN — ' + d.comparison.security_class.gnn + ', правила — ' + d.comparison.security_class.rules + '.</div></div>';
+  }
+  out += '<div class="hint">' + escapeHtml(d.disclaimer || '') + '</div></div>';
+  return out;
+}
 </script>
 </body>
 </html>
