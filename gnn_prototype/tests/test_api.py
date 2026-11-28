@@ -60,7 +60,7 @@ def test_analyze_uses_only_gnn_predictions(client):
 
     #assert "model" in data
     assert "model" in data
-    assert "heuristic" not in data
+    assert "diagnostics" in data
     assert "summary" in data
     assert "topology" in data
 
@@ -70,7 +70,7 @@ def test_analyze_uses_only_gnn_predictions(client):
     assert "topology" in data
 
     # No heuristic analysis in runtime response.
-    #assert "heuristic" not in data
+    #assert "diagnostics" in data
 
     model = data["model"]
 
@@ -107,7 +107,7 @@ def test_analyze_topology_without_edges(client):
     data = response.json()
 
     assert "model" in data
-    assert "heuristic" not in data
+    assert "diagnostics" in data
 
 
 def test_sample_does_not_expose_training_metadata(
@@ -200,7 +200,7 @@ def test_analyze_valid_topology(client):
     data = response.json()
 
     assert "model" in data
-    assert "heuristic" not in data
+    assert "diagnostics" in data
     assert "summary" in data
     assert "topology" in data
 
@@ -229,7 +229,7 @@ def test_analyze_topology_without_edges(client):
     data = response.json()
 
     assert "model" in data
-    assert "heuristic" not in data
+    assert "diagnostics" in data
 
     assert 0.0 <= data["model"]["score"] <= 1.0
     assert data["topology"]["edges"] == []
@@ -283,3 +283,58 @@ def test_sample_endpoint(client, tmp_path, monkeypatch):
     assert "metadata" not in data
     assert "nodes" in data
     assert "edges" in data
+
+
+def test_analyze_returns_rule_based_diagnostics(client):
+    payload = {
+        "nodes": [
+            {"id": 0, "type": "printer"},
+            {"id": 1, "type": "l3_switch"},
+            {"id": 2, "type": "firewall"},
+            {"id": 3, "type": "router"},
+            {"id": 4, "type": "l3_switch"},
+            {"id": 5, "type": "ids_ips"},
+        ],
+        "edges": [
+            {"source": 0, "target": 3, "bandwidth": 7203, "throughput": 3933},
+            {"source": 0, "target": 2, "bandwidth": 5181, "throughput": 649},
+            {"source": 0, "target": 4, "bandwidth": 8414, "throughput": 2257},
+            {"source": 0, "target": 1, "bandwidth": 5053, "throughput": 1860},
+            {"source": 1, "target": 5, "bandwidth": 1907, "throughput": 4635},
+            {"source": 1, "target": 3, "bandwidth": 7838, "throughput": 3223},
+            {"source": 1, "target": 2, "bandwidth": 4084, "throughput": 4116},
+            {"source": 2, "target": 5, "bandwidth": 5500, "throughput": 2223},
+            {"source": 2, "target": 3, "bandwidth": 4560, "throughput": 1144},
+            {"source": 3, "target": 5, "bandwidth": 1012, "throughput": 2777},
+            {"source": 3, "target": 4, "bandwidth": 8890, "throughput": 328},
+            {"source": 4, "target": 5, "bandwidth": 8597, "throughput": 4140},
+        ],
+    }
+
+    response = client.post("/api/analyze", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert "model" in data
+    assert "diagnostics" in data
+    diagnostics = data["diagnostics"]
+
+    printer_router = [
+        issue for issue in diagnostics["issues"]
+        if issue["code"] == "printer_router_connection"
+    ]
+    assert len(printer_router) == 1
+    assert "Устройство 0" in printer_router[0]["description"]
+    assert "Устройство 3" in printer_router[0]["description"]
+    assert printer_router[0]["affected_edges"][0]["source"] == 0
+
+    assert any(
+        item["code"] == "no_unprotected_hosts_by_current_rule"
+        and "Host" in item["description"]
+        for item in diagnostics["positive_results"]
+    )
+    assert any(
+        item["code"] == "no_critical_node_overload"
+        for item in diagnostics["positive_results"]
+    )
+    assert "comparison" in diagnostics
